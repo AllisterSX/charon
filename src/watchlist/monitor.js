@@ -88,6 +88,7 @@ async function processRow(row, strat) {
   const trough = computeTrough(row, candles, ath);
 
   // ── Persist tick ─────────────────────────────────────────────────────────
+  const ema20Slope5 = trend.indicators?.ema20_slope_5 ?? 0;
   insertWatchlistTick(mint, {
     price,
     mcap: row.current_mcap_usd,            // mcap refreshed by signal handler / future hook
@@ -100,6 +101,7 @@ async function processRow(row, strat) {
     trend_status: trend.status,
     candle_tf: tf,
     source,
+    ema_slope_5: ema20Slope5,
   });
   updateWatchlistTick(mint, {
     current_price_native: price,
@@ -150,11 +152,15 @@ async function processRow(row, strat) {
 }
 
 function computeTokenAge(row) {
-  // We track tokenAge via the originating candidate.signals.ageMs at admission.
-  // For long-lived watchlist rows, age is approximated as (now - addedAt) + originalAge.
+  // Token age at admission is stored in snapshot_json by the pipeline.
+  // For long-lived watchlist rows, age = (now - addedAt) + age_at_admission.
   const addedAt = Number(row.added_at_ms || 0);
-  const originalAge = Number(row.original_age_ms || 0);
-  return Math.max(0, originalAge + (now() - addedAt));
+  let ageAtAdmission = 0;
+  try {
+    const snap = typeof row.snapshot_json === 'string' ? JSON.parse(row.snapshot_json || '{}') : {};
+    ageAtAdmission = Number(snap.verdict?.ageMs || snap.ageMs || 0);
+  } catch {}
+  return Math.max(0, ageAtAdmission + (now() - addedAt));
 }
 
 function computeAth(row, candles) {

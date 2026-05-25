@@ -2,7 +2,7 @@
 // Returns { status: 'uptrend'|'neutral'|'reversing'|'downtrend', score, components }.
 
 import { ema } from '../chart/indicators.js';
-import { mean, stddev, zscore } from '../utils.js';
+import { mean, stddev } from '../utils.js';
 import { activeStrategy } from '../db/settings.js';
 
 export function scoreTrend(candles, options = {}) {

@@ -80,7 +80,7 @@ export function insertWatchlistTick(mint, ind) {
     ind.ema20 ?? null, ind.ema50 ?? null,
     ind.stoch_k ?? null, ind.stoch_d ?? null,
     ind.trend_score ?? null, ind.trend_status ?? null, ind.candle_tf ?? null,
-    json(ind),
+    json({ ema_slope_5: ind.ema_slope_5 ?? null, source: ind.source ?? null }),
   );
 }
 

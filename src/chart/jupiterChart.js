@@ -1,10 +1,14 @@
 import axios from 'axios';
 import { JSON_HEADERS } from '../config.js';
 import { now } from '../utils.js';
-import { tfToJupiter } from './adaptiveTimeframe.js';
+import { tfToJupiter, tfTtlMs } from './adaptiveTimeframe.js';
+import { getChartCache, putChartCache } from '../db/chartCache.js';
 
-// Jupiter datapi candles: GET https://datapi.jup.ag/v2/charts/<mint>?interval=<I>&candles=<n>&type=price&quote=native
+// Jupiter datapi candles: GET https://datapi.jup.ag/v2/charts/<mint>
+//   ?interval=<I>&candles=<n>&type=price&quote=native&to=<ms>
+// Supported intervals: 1_SECOND, 15_SECOND, 30_SECOND, 1_MINUTE, 5_MINUTE, etc.
 // Response: { candles: [{ time, open, high, low, close, volume }, ...] }
+
 function normalizeJupiterCandle(row) {
   if (!row) return null;
   const t = Number(row.time ?? row.t ?? 0);
@@ -32,26 +36,20 @@ export async function fetchJupiterCandles(mint, tf, count = 80) {
     candles.sort((a, b) => Number(a.t) - Number(b.t));
     return { candles, source: 'jupiter', fetchedAtMs: now() };
   } catch (err) {
-    console.log(`[jup-chart] ${mint.slice(0, 8)}... ${tf} ${err.response?.status || ''} ${err.message}`);
+    console.log(`[chart] ${mint.slice(0, 8)}... ${tf} ${err.response?.status || ''} ${err.message}`);
     return { candles: [], source: 'jupiter', error: err.message };
   }
 }
 
-// Convenience wrapper used by watchlist monitor (GMGN primary, Jupiter fallback)
-import { fetchGmgnCandles } from './gmgnChart.js';
-import { getChartCache, putChartCache } from '../db/chartCache.js';
-import { tfTtlMs } from './adaptiveTimeframe.js';
-
+// Primary chart fetch with cache. Jupiter is the sole chart source.
+// GMGN OpenAPI does not expose a K-line endpoint (confirmed 404 on all paths).
 export async function fetchCandlesAdaptive(mint, tf, count = 80) {
   const cacheKey = `${mint}:${tf}`;
   const cached = getChartCache(cacheKey);
   if (cached && cached.candles.length >= Math.min(count, 30)) return cached;
 
   const ttl = tfTtlMs(tf);
-  let result = await fetchGmgnCandles(mint, tf, count);
-  if (result.candles.length === 0) {
-    result = await fetchJupiterCandles(mint, tf, count);
-  }
+  const result = await fetchJupiterCandles(mint, tf, count);
   if (result.candles.length > 0) putChartCache(cacheKey, result.candles, result.source, ttl);
   return result;
 }

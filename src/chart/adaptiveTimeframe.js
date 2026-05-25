@@ -28,9 +28,9 @@ export function tfToGmgn(tf) {
 }
 
 // Map Apex tf string to Jupiter chart interval.
-// Jupiter chart supports: 1_SECOND, 1_MINUTE, 5_MINUTE, 15_MINUTE, 30_MINUTE, 1_HOUR, 4_HOUR, 1_DAY
+// Jupiter chart supports: 1_SECOND, 15_SECOND, 30_SECOND, 1_MINUTE, 5_MINUTE, 15_MINUTE, 30_MINUTE, 1_HOUR, 4_HOUR, 1_DAY
 export function tfToJupiter(tf) {
-  if (tf === '30s') return '1_MINUTE';   // Jupiter does not expose 30s; closest is 1m.
+  if (tf === '30s') return '30_SECOND';
   if (tf === '1m')  return '1_MINUTE';
   return '5_MINUTE';
 }

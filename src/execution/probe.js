@@ -53,6 +53,8 @@ export async function openProbe({ candidate, candidateId, watchlistRow, signal, 
       signal, tf,
       evaluation: { reasons: evaluation?.reasons, metrics: evaluation?.metrics },
       candleCount: candles?.length || 0,
+      vol_5m_at_entry: Number(watchlistRow?.vol_5m_usd || 0),
+      entry_ema20: Number(watchlistRow?.ema20 || 0),
     },
   });
 
@@ -110,9 +112,14 @@ export async function evaluateProbe(position, marketSnapshot, ind) {
 
 function evaluateProbeGuards(strat, position, marketSnapshot, ind) {
   const failed = [];
+  // Parse snapshot_json (stored as TEXT in DB row).
+  const snap = typeof position.snapshot_json === 'string'
+    ? JSON.parse(position.snapshot_json || '{}')
+    : (position.snapshot || {});
+
   if (strat.probe_require_volume_holding) {
     const volNow = Number(ind?.vol_5m_usd || 0);
-    const volEntry = Number(position.snapshot?.vol_5m_at_entry || 0);
+    const volEntry = Number(snap.vol_5m_at_entry || 0);
     if (volEntry > 0 && volNow < volEntry * 0.5) failed.push('volume_drop');
   }
   if (strat.probe_require_ema_bullish) {
@@ -125,7 +132,7 @@ function evaluateProbeGuards(strat, position, marketSnapshot, ind) {
   }
   if (strat.probe_require_above_entry_ema) {
     const cur = Number(marketSnapshot?.priceUsd || 0);
-    const entryEma = Number(position.snapshot?.entry_ema20 || 0);
+    const entryEma = Number(snap.entry_ema20 || 0);
     if (entryEma > 0 && cur < entryEma) failed.push('below_entry_ema');
   }
   return { allPassed: failed.length === 0, failed };
