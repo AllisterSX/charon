@@ -1,6 +1,6 @@
 // Position monitor (FR-9). Runs every POSITION_CHECK_MS (default 10s).
 // For each open / probe_open / probe_confirmed / probe_inconclusive position:
-//   1. Refresh market price/mcap (gmgn primary, jupiter fallback)
+//   1. Refresh market price/mcap (Jupiter primary, GMGN token info fallback)
 //   2. Refresh local indicators from cached chart (no extra fetch — uses watchlist tick)
 //   3. If probe_open → evaluateProbe → confirmed (addon) / failed (close) / inconclusive (degrade)
 //   4. If open      → evaluateExit  → SL / partial_tp / trail_exit / trend_exit / hold

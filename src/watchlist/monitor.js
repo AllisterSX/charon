@@ -1,7 +1,7 @@
 // Watchlist monitor (FR-4.3). Runs every 30s.
 // For each active watchlist row:
 //   1. Pick adaptive timeframe based on token age
-//   2. Fetch candles (GMGN primary → Jupiter fallback)
+//   2. Fetch candles (Jupiter chart API — 30s/1m/5m)
 //   3. Compute indicators (EMA20/50, Stoch RSI)
 //   4. Score trend; remove if downtrend
 //   5. Evaluate Signal A and Signal B; trigger entry if either fires
@@ -28,7 +28,7 @@ import { recordLlmDecision } from '../db/decisions.js';
 import { now, mean } from '../utils.js';
 import { onEntrySignal } from '../entry/orchestrator.js';
 
-// Concurrency cap on chart fetches per cycle (avoid hammering GMGN).
+// Concurrency cap on chart fetches per cycle (avoid hammering Jupiter).
 const FETCH_CONCURRENCY = 5;
 
 export async function monitorWatchlist() {

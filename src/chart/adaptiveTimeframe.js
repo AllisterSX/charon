@@ -19,14 +19,6 @@ export function tfTtlMs(tf) {
   return 60_000;
 }
 
-// Map Apex tf string to GMGN K-line interval.
-// GMGN Solana K-line: 1s,15s,30s,1m,5m,15m,1h,4h,1d
-export function tfToGmgn(tf) {
-  if (tf === '30s') return '30s';
-  if (tf === '1m')  return '1m';
-  return '5m';
-}
-
 // Map Apex tf string to Jupiter chart interval.
 // Jupiter chart supports: 1_SECOND, 15_SECOND, 30_SECOND, 1_MINUTE, 5_MINUTE, 15_MINUTE, 30_MINUTE, 1_HOUR, 4_HOUR, 1_DAY
 export function tfToJupiter(tf) {

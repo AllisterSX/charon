@@ -63,7 +63,7 @@ pm2 logs apex --lines 50       # expect [bot] Apex v3.0.0 started
 | `SIGNAL_SERVER_URL`  | `https://api.thecharon.xyz/api` |
 | `SIGNAL_SERVER_KEY`  | Charon API key |
 | `HELIUS_API_KEY`     | Used for SPL mint authority + RPC |
-| `GMGN_API_KEY`       | Primary chart source |
+| `GMGN_API_KEY`       | Token info enrichment (price, mcap, fees) |
 | `JUPITER_API_KEY`    | Required for live mode |
 | `SOLANA_PRIVATE_KEY` | Required for live mode (base58 or `[…]` JSON array) |
 | `LLM_API_KEY`        | OpenAI-compatible endpoint |
