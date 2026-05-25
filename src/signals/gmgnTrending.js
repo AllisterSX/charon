@@ -47,11 +47,16 @@ export async function fetchGmgnTrending() {
   if (gmgnBackoffActive('trending')) return;
 
   try {
-    // GMGN trending endpoint: /v1/rank/sol/swaps/{timeframe}
-    // Also available: /v1/rank/sol/volume/{timeframe}
-    const orderPath = cfg.orderby === 'swaps' ? 'swaps' : 'volume';
-    const payload = await gmgnFetch(`/v1/rank/sol/${orderPath}/${cfg.timeframe}`, {
-      params: { limit: cfg.limit },
+    // GMGN trending endpoint: GET /v1/market/rank
+    // Params: chain=sol, interval=5m, limit=50, order_by=volume, direction=desc
+    const payload = await gmgnFetch('/v1/market/rank', {
+      params: {
+        chain: 'sol',
+        interval: cfg.timeframe,
+        limit: cfg.limit,
+        order_by: cfg.orderby,
+        direction: 'desc',
+      },
     });
 
     const rows = payload?.data?.rank

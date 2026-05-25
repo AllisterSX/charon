@@ -18,6 +18,7 @@ import { listBlacklist, addBlacklist, removeBlacklist } from '../db/blacklist.js
 import { removeFromWatchlist } from '../watchlist/manager.js';
 import { watchlistSummary } from './format.js';
 import { parseNumericInput } from '../utils.js';
+import { escapeHtml } from '../format.js';
 
 function isAuthorized(chatId) {
   return String(chatId) === String(TELEGRAM_CHAT_ID);
@@ -96,7 +97,7 @@ export function setupTelegram() {
     else value = rawValue;
     cfg[key] = value;
     updateStrategyConfig(strat.id, cfg);
-    reply(msg, `Updated <code>${strat.id}.${key}</code> = <code>${rawValue}</code>`);
+    reply(msg, `Updated <code>${escapeHtml(strat.id)}.${escapeHtml(key)}</code> = <code>${escapeHtml(String(rawValue))}</code>`);
   });
 
   // /stratclone <newId> [name…]
