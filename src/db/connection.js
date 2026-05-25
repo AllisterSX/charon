@@ -386,6 +386,18 @@ function seedStrategies() {
     // Adaptive TF (FR-6)
     tf_age_30s_max_ms: 6 * 3600 * 1000,         // <6h → 30s
     tf_age_1m_max_ms: 48 * 3600 * 1000,         // <48h → 1m, else 5m
+
+    // GMGN Trending signal source (secondary discovery)
+    gmgn_trending_enabled: true,
+    gmgn_trending_timeframe: '5m',
+    gmgn_trending_limit: 50,
+    gmgn_trending_orderby: 'volume',
+    gmgn_trending_min_mcap: 50000,               // $50K
+    gmgn_trending_max_mcap: 5000000,             // $5M
+    gmgn_trending_min_age_ms: 3600000,           // 1h
+    gmgn_trending_max_age_ms: 604800000,         // 7d
+    gmgn_trending_min_holders: 500,
+    gmgn_trending_min_fees_sol: 5,               // 5 SOL total fees
   }), ts);
 }
 

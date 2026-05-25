@@ -14,8 +14,10 @@ export function gateCandidate(candidate, strat) {
   const maxHolder = Number(candidate.holders?.maxHolderPercent || 0);
   const sourceCount = Number(candidate.signals?.sourceCount || 0);
 
-  // 1) Source count
-  if (Number(strat.min_source_count || 0) > 0 && sourceCount < strat.min_source_count) {
+  // 1) Source count — skip for gmgn_trending (already pre-filtered by its own gate)
+  const sources = candidate.signals?.sources || [];
+  const isGmgnTrending = sources.includes('gmgn_trending');
+  if (!isGmgnTrending && Number(strat.min_source_count || 0) > 0 && sourceCount < strat.min_source_count) {
     failures.push(`min_source_count: ${sourceCount} < ${strat.min_source_count}`);
   }
 
@@ -36,12 +38,14 @@ export function gateCandidate(candidate, strat) {
     }
   }
 
-  // 4) Token age window
-  if (Number(strat.token_age_min_ms || 0) > 0 && ageMs > 0 && ageMs < strat.token_age_min_ms) {
-    failures.push(`token_age_min: ${Math.round(ageMs / 60000)}m < ${Math.round(strat.token_age_min_ms / 60000)}m`);
-  }
-  if (Number(strat.token_age_max_ms || 0) > 0 && ageMs > 0 && ageMs > strat.token_age_max_ms) {
-    failures.push(`token_age_max: ${Math.round(ageMs / 60000)}m > ${Math.round(strat.token_age_max_ms / 60000)}m`);
+  // 4) Token age window — skip for gmgn_trending (has its own age pre-filter)
+  if (!isGmgnTrending) {
+    if (Number(strat.token_age_min_ms || 0) > 0 && ageMs > 0 && ageMs < strat.token_age_min_ms) {
+      failures.push(`token_age_min: ${Math.round(ageMs / 60000)}m < ${Math.round(strat.token_age_min_ms / 60000)}m`);
+    }
+    if (Number(strat.token_age_max_ms || 0) > 0 && ageMs > 0 && ageMs > strat.token_age_max_ms) {
+      failures.push(`token_age_max: ${Math.round(ageMs / 60000)}m > ${Math.round(strat.token_age_max_ms / 60000)}m`);
+    }
   }
 
   // 5) Market cap window

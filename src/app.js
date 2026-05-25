@@ -10,6 +10,7 @@ import { initLiveExecution } from './liveExecutor.js';
 import { setupTelegram } from './telegram/commands.js';
 import { sendTelegram, sendWatchlistSummary } from './telegram/send.js';
 import { fetchSignals, setCandidateHandler } from './signals/charonServer.js';
+import { fetchGmgnTrending, setTrendingHandler } from './signals/gmgnTrending.js';
 import { processSignal } from './pipeline/screen.js';
 import { monitorWatchlist } from './watchlist/monitor.js';
 import { monitorPositions } from './execution/positions.js';
@@ -27,9 +28,11 @@ export async function startApex() {
   setupTelegram();
 
   setCandidateHandler(processSignal);
+  setTrendingHandler(processSignal);
 
   const alert = (msg) => sendTelegram(msg);
   const trackSignals    = makeFailureTracker('signals',     alert);
+  const trackTrending   = makeFailureTracker('gmgn-trend',  alert);
   const trackWatchlist  = makeFailureTracker('watchlist',   alert);
   const trackPositions  = makeFailureTracker('positions',   alert);
 
@@ -37,6 +40,7 @@ export async function startApex() {
   await fetchSignals().catch(err => console.log(`[signals] initial fetch failed: ${err.message}`));
 
   setInterval(() => trackSignals(() => fetchSignals()), SIGNAL_POLL_MS);
+  setInterval(() => trackTrending(() => fetchGmgnTrending()), 60_000);  // GMGN trending every 60s
   setInterval(() => trackWatchlist(() => monitorWatchlist()), WATCHLIST_MONITOR_MS);
   setInterval(() => trackPositions(() => monitorPositions()), POSITION_CHECK_MS);
 
