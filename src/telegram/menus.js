@@ -5,6 +5,13 @@ import { ENABLE_LLM, LLM_API_KEY, LLM_MODEL } from '../config.js';
 import { escapeHtml, fmtPct, fmtSol, fmtUsd, fmtMs } from '../format.js';
 import { formatPosition } from './format.js';
 
+// Safe helpers — never crash on undefined strategy fields
+function sf(v, fallback = '?') { return v != null ? v : fallback; }
+function sfPct(v) { const n = Number(v); return Number.isFinite(n) ? fmtPct(n) : '?'; }
+function sfSol(v) { const n = Number(v); return Number.isFinite(n) ? fmtSol(n) : '?'; }
+function sfUsd(v) { const n = Number(v); return Number.isFinite(n) ? fmtUsd(n) : '?'; }
+function sfMs(v)  { const n = Number(v); return Number.isFinite(n) && n > 0 ? fmtMs(n) : '?'; }
+
 // ── Main menu ────────────────────────────────────────────────────────────────
 
 export function menuKeyboard() {
@@ -35,9 +42,9 @@ export function mainMenuText() {
     `🦅 <b>Apex</b>  v3.0.0`,
     ``,
     `${modeEmoji} Mode: <b>${escapeHtml(mode)}</b>`,
-    `🎯 Strategy: <b>${escapeHtml(strat.name)}</b>`,
-    `👁 Watchlist: <b>${wlCount}/${strat.watchlist_max ?? 25}</b>`,
-    `📍 Positions: <b>${posCount}/${strat.max_open_positions ?? 10}</b>`,
+    `🎯 Strategy: <b>${escapeHtml(strat.name || strat.id)}</b>`,
+    `👁 Watchlist: <b>${wlCount}/${sf(strat.watchlist_max, 25)}</b>`,
+    `📍 Positions: <b>${posCount}/${sf(strat.max_open_positions, 10)}</b>`,
     `🤖 LLM: ${ENABLE_LLM && LLM_API_KEY ? `<b>${escapeHtml(LLM_MODEL)}</b>` : '<b>off</b>'}`,
   ].join('\n');
 }
@@ -53,13 +60,13 @@ export function agentText() {
     ``,
     `Agent: <b>${boolSetting('agent_enabled', true) ? '✅ on' : '⛔ off'}</b>`,
     `${modeEmoji} Mode: <b>${escapeHtml(mode)}</b>`,
-    `🎯 Strategy: <b>${escapeHtml(strat.name)}</b>`,
+    `🎯 Strategy: <b>${escapeHtml(strat.name || strat.id)}</b>`,
     ``,
-    `Position: ${fmtSol(strat.position_size_sol)} SOL  probe ${strat.probe_size_pct}%  max ${strat.max_open_positions} pos`,
-    `Probe: confirm +${strat.probe_confirm_min_pnl_pct}% / fail ${strat.probe_fail_max_pnl_pct}% / ${fmtMs(strat.probe_max_age_ms)}`,
-    `Exit: SL ${fmtPct(strat.sl_pct)}  trail ${fmtPct(strat.trailing_pct)}  Stoch>${strat.stoch_overbought}→sell ${strat.partial_tp_sell_pct}%`,
-    `Re-entry cooldown: ${fmtMs(strat.reentry_cooldown_ms)}`,
-    `LLM: ${strat.use_llm && ENABLE_LLM && LLM_API_KEY ? `on  revalidate ${fmtMs(strat.llm_revalidate_interval_ms)}` : 'off'}`,
+    `Position: ${sfSol(strat.position_size_sol)} SOL  probe ${sf(strat.probe_size_pct, '?')}%  max ${sf(strat.max_open_positions, '?')} pos`,
+    `Probe: confirm +${sf(strat.probe_confirm_min_pnl_pct, '?')}% / fail ${sf(strat.probe_fail_max_pnl_pct, '?')}% / ${sfMs(strat.probe_max_age_ms)}`,
+    `Exit: SL ${sfPct(strat.sl_pct)}  trail ${sfPct(strat.trailing_pct)}  Stoch>${sf(strat.stoch_overbought, '?')}→sell ${sf(strat.partial_tp_sell_pct, '?')}%`,
+    `Re-entry cooldown: ${sfMs(strat.reentry_cooldown_ms)}`,
+    `LLM: ${strat.use_llm && ENABLE_LLM && LLM_API_KEY ? `on  revalidate ${sfMs(strat.llm_revalidate_interval_ms)}` : 'off'}`,
   ].join('\n');
 }
 
@@ -84,67 +91,93 @@ export function agentKeyboard() {
 export function strategyMenuText() {
   const strat = activeStrategy();
   const all = allStrategies();
-  return [
+
+  // Detect whether this is an apex_obicle-style strategy or a legacy charon strategy
+  const isApex = strat.probe_size_pct != null;
+
+  const lines = [
     `🎯 <b>Strategy</b>`,
     ``,
-    `Active: <b>${escapeHtml(strat.name)}</b>  <code>${escapeHtml(strat.id)}</code>`,
+    `Active: <b>${escapeHtml(strat.name || strat.id)}</b>  <code>${escapeHtml(strat.id)}</code>`,
     ``,
-    `<b>Sizing</b>`,
-    `  Size: ${fmtSol(strat.position_size_sol)} SOL  Probe: ${strat.probe_size_pct}%  Max pos: ${strat.max_open_positions}`,
-    ``,
-    `<b>Metrics gate</b>`,
-    `  Mcap: ${fmtUsd(strat.min_mcap_usd)} – ${fmtUsd(strat.max_mcap_usd)}`,
-    `  Age: 0 – ${fmtMs(strat.token_age_max_ms)}`,
-    `  Holders ≥ ${strat.min_holders}  Top10 ≤ ${fmtPct(strat.max_top10_holder_percent)}`,
-    ``,
-    `<b>Watchlist</b>`,
-    `  Max: ${strat.watchlist_max}  Low-vol: ${fmtUsd(strat.watchlist_low_volume_threshold_usd)}`,
-    `  Trend: up ≥ ${strat.trend_uptrend_min_score}  down ≤ ${strat.trend_reversal_max_score}`,
-    ``,
-    `<b>Entry signals</b>`,
-    `  A (Obicle TA): EMA${strat.sigA_ema_period} touch ${strat.sigA_ema_touch_pct}%  Stoch<${strat.sigA_stoch_oversold}`,
-    `  B (Momentum): vol ${strat.sigB_vol_spike_multiplier}×  z≥${strat.sigB_vol_spike_zscore}  ATH dip ${strat.sigB_ath_dip_min_pct}%..${strat.sigB_ath_dip_max_pct}%`,
-    ``,
-    `<b>Probe</b>`,
-    `  Confirm +${strat.probe_confirm_min_pnl_pct}% / fail ${strat.probe_fail_max_pnl_pct}% / ${fmtMs(strat.probe_max_age_ms)}`,
-    ``,
-    `<b>Exit</b>`,
-    `  SL ${fmtPct(strat.sl_pct)}  Stoch>${strat.stoch_overbought}→sell ${strat.partial_tp_sell_pct}%  trail ${fmtPct(strat.trailing_pct)}`,
-    ``,
-    `<b>LLM</b>: ${strat.use_llm ? `on  min score ${strat.llm_min_narrative_score}  revalidate ${fmtMs(strat.llm_revalidate_interval_ms)}` : 'off'}`,
-    ``,
-    ...all.map(s => `${s.enabled ? '▶' : '○'} ${escapeHtml(s.name)}  <code>${escapeHtml(s.id)}</code>`),
-  ].join('\n');
+  ];
+
+  if (isApex) {
+    lines.push(
+      `<b>Sizing</b>`,
+      `  Size: ${sfSol(strat.position_size_sol)} SOL  Probe: ${sf(strat.probe_size_pct, '?')}%  Max pos: ${sf(strat.max_open_positions, '?')}`,
+      ``,
+      `<b>Metrics gate</b>`,
+      `  Mcap: ${sfUsd(strat.min_mcap_usd)} – ${sfUsd(strat.max_mcap_usd)}`,
+      `  Age: 0 – ${sfMs(strat.token_age_max_ms)}`,
+      `  Holders ≥ ${sf(strat.min_holders, '?')}  Top10 ≤ ${sfPct(strat.max_top10_holder_percent)}`,
+      ``,
+      `<b>Watchlist</b>`,
+      `  Max: ${sf(strat.watchlist_max, '?')}  Low-vol: ${sfUsd(strat.watchlist_low_volume_threshold_usd)}`,
+      `  Trend: up ≥ ${sf(strat.trend_uptrend_min_score, '?')}  down ≤ ${sf(strat.trend_reversal_max_score, '?')}`,
+      ``,
+      `<b>Entry signals</b>`,
+      `  A (Obicle TA): ${sf(strat.sigA_enabled, true) ? '✅' : '⛔'}  EMA${sf(strat.sigA_ema_period, 20)} touch ${sf(strat.sigA_ema_touch_pct, '?')}%  Stoch<${sf(strat.sigA_stoch_oversold, '?')}`,
+      `  B (Momentum): ${sf(strat.sigB_enabled, true) ? '✅' : '⛔'}  vol ${sf(strat.sigB_vol_spike_multiplier, '?')}×  z≥${sf(strat.sigB_vol_spike_zscore, '?')}  ATH dip ${sf(strat.sigB_ath_dip_min_pct, '?')}%..${sf(strat.sigB_ath_dip_max_pct, '?')}%`,
+      ``,
+      `<b>Probe</b>`,
+      `  Confirm +${sf(strat.probe_confirm_min_pnl_pct, '?')}% / fail ${sf(strat.probe_fail_max_pnl_pct, '?')}% / ${sfMs(strat.probe_max_age_ms)}`,
+      ``,
+      `<b>Exit</b>`,
+      `  SL ${sfPct(strat.sl_pct)}  Stoch>${sf(strat.stoch_overbought, '?')}→sell ${sf(strat.partial_tp_sell_pct, '?')}%  trail ${sfPct(strat.trailing_pct)}`,
+      ``,
+      `<b>LLM</b>: ${strat.use_llm ? `on  min score ${sf(strat.llm_min_narrative_score, '?')}  revalidate ${sfMs(strat.llm_revalidate_interval_ms)}` : 'off'}`,
+    );
+  } else {
+    // Legacy charon strategy — show what we have
+    lines.push(
+      `⚠️ <i>Legacy strategy (charon-v2 format). Switch to apex_obicle for full Apex features.</i>`,
+      ``,
+      `Size: ${sfSol(strat.position_size_sol)} SOL  Max pos: ${sf(strat.max_open_positions, '?')}`,
+      `Mcap: ${sfUsd(strat.min_mcap_usd)} – ${sfUsd(strat.max_mcap_usd)}`,
+      `TP: ${sfPct(strat.tp_percent)}  SL: ${sfPct(strat.sl_percent)}  Trail: ${sfPct(strat.trailing_percent)}`,
+      `LLM: ${strat.use_llm ? 'on' : 'off'}`,
+    );
+  }
+
+  lines.push(``, ...all.map(s => `${s.enabled ? '▶' : '○'} ${escapeHtml(s.name)}  <code>${escapeHtml(s.id)}</code>`));
+  return lines.join('\n');
 }
 
 export function strategyKeyboard() {
   const strat = activeStrategy();
   const all = allStrategies();
+  const isApex = strat.probe_size_pct != null;
+
+  const quickSet = isApex ? [
+    [
+      { text: `SL ${sfPct(strat.sl_pct)}`, callback_data: 'stratinput:sl_pct' },
+      { text: `Trail ${sfPct(strat.trailing_pct)}`, callback_data: 'stratinput:trailing_pct' },
+      { text: `Size ${sfSol(strat.position_size_sol)}`, callback_data: 'stratinput:position_size_sol' },
+    ],
+    [
+      { text: `Max pos ${sf(strat.max_open_positions, '?')}`, callback_data: 'stratinput:max_open_positions' },
+      { text: `Probe ${sf(strat.probe_size_pct, '?')}%`, callback_data: 'stratinput:probe_size_pct' },
+      { text: `LLM ${strat.use_llm ? 'on' : 'off'}`, callback_data: 'stratcfg:use_llm' },
+    ],
+    [
+      { text: `Max mcap ${sfUsd(strat.max_mcap_usd)}`, callback_data: 'stratinput:max_mcap_usd' },
+      { text: `Min holders ${sf(strat.min_holders, '?')}`, callback_data: 'stratinput:min_holders' },
+    ],
+  ] : [
+    [{ text: '⚠️ Switch to apex_obicle for full features', callback_data: 'strategy:select:apex_obicle' }],
+  ];
+
   return {
     reply_markup: {
       inline_keyboard: [
-        // Strategy switcher
         [{ text: '── Switch ──', callback_data: 'noop' }],
         ...all.map(s => [{
           text: `${s.enabled ? '▶ ' : ''}${s.name}`,
           callback_data: `strategy:select:${s.id}`,
         }]),
-        // Quick-set most common params
         [{ text: '── Quick set ──', callback_data: 'noop' }],
-        [
-          { text: `SL ${fmtPct(strat.sl_pct)}`, callback_data: 'stratinput:sl_pct' },
-          { text: `Trail ${fmtPct(strat.trailing_pct)}`, callback_data: 'stratinput:trailing_pct' },
-          { text: `Size ${fmtSol(strat.position_size_sol)}`, callback_data: 'stratinput:position_size_sol' },
-        ],
-        [
-          { text: `Max pos ${strat.max_open_positions}`, callback_data: 'stratinput:max_open_positions' },
-          { text: `Probe ${strat.probe_size_pct}%`, callback_data: 'stratinput:probe_size_pct' },
-          { text: `LLM ${strat.use_llm ? 'on' : 'off'}`, callback_data: 'stratcfg:use_llm' },
-        ],
-        [
-          { text: `Max mcap ${fmtUsd(strat.max_mcap_usd)}`, callback_data: 'stratinput:max_mcap_usd' },
-          { text: `Min holders ${strat.min_holders}`, callback_data: 'stratinput:min_holders' },
-        ],
+        ...quickSet,
         [{ text: '← Back', callback_data: 'menu:main' }],
       ],
     },
