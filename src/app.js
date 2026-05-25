@@ -40,7 +40,7 @@ export async function startApex() {
   setInterval(() => trackWatchlist(() => monitorWatchlist()), WATCHLIST_MONITOR_MS);
   setInterval(() => trackPositions(() => monitorPositions()), POSITION_CHECK_MS);
 
-  // Periodic watchlist status push.
+  // Periodic watchlist status push — only when watchlist has tokens.
   setInterval(() => sendWatchlistSummary().catch(() => {}), WATCHLIST_STATUS_PUSH_MS);
 
   // Cache + tick pruning, hourly.

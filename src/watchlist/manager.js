@@ -18,6 +18,7 @@ import {
 import { isBlacklisted, addBlacklist } from '../db/blacklist.js';
 import { activeStrategy } from '../db/settings.js';
 import { now } from '../utils.js';
+import { sendWatchlistAdmit, sendWatchlistRemove } from '../telegram/send.js';
 
 export function isWatchlisted(mint) {
   const row = getWatchlistRow(mint);
@@ -40,6 +41,8 @@ export function admitOrEvict(candidateId, candidate, verdict) {
   if (current < max) {
     insertWatchlistRow({ candidateId, candidate, verdict });
     logWatchlistEvent(mint, 'added', verdict?.reason || '', { score: verdict?.narrative_score });
+    const newRow = getWatchlistRow(mint);
+    if (newRow) sendWatchlistAdmit(newRow, verdict).catch(() => {});
     return { admitted: true };
   }
 
@@ -68,6 +71,8 @@ export function admitOrEvict(candidateId, candidate, verdict) {
     score: verdict?.narrative_score,
     displaced: evictTarget.mint,
   });
+  const newRow = getWatchlistRow(mint);
+  if (newRow) sendWatchlistAdmit(newRow, verdict).catch(() => {});
   return { admitted: true, evicted: evictTarget.mint };
 }
 
@@ -106,8 +111,11 @@ function pickEvictionTarget(_strat) {
 
 export function removeFromWatchlist(mint, reason, payload = {}) {
   if (!isWatchlisted(mint)) return false;
+  const row = getWatchlistRow(mint);
+  const symbol = row?.symbol || null;
   markWatchlistRemoved(mint, reason);
   logWatchlistEvent(mint, 'removed', reason, payload);
+  sendWatchlistRemove(mint, symbol, reason).catch(() => {});
   return true;
 }
 
