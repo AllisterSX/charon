@@ -121,13 +121,33 @@ async function processRow(row, strat) {
   });
 
   // ── Trend-based eviction ────────────────────────────────────────────────
+  // Debounce: only evict if trend has been downtrend for 2+ consecutive ticks.
+  // This prevents noisy 30s candles from causing false evictions.
   if (trend.status === 'downtrend') {
-    removeFromWatchlist(mint, 'trend_reversal', { score: trend.score });
-    return;
+    const prevTrend = row.trend_status;
+    if (prevTrend === 'downtrend') {
+      // 2nd consecutive downtrend tick — check no open position before evicting
+      const { lastPositionForMint } = await import('../db/positions.js');
+      const lastPos = lastPositionForMint(mint);
+      const hasOpenPos = lastPos && ['open', 'probe_open', 'probe_confirmed', 'probe_inconclusive'].includes(lastPos.status);
+      if (!hasOpenPos) {
+        removeFromWatchlist(mint, 'trend_reversal', { score: trend.score });
+        return;
+      }
+      // Has open position — keep on watchlist, just update trend status
+    }
+    // First downtrend tick — don't evict yet, wait for confirmation next tick
   }
 
   // ── Periodic LLM revalidation ───────────────────────────────────────────
   await maybeRevalidateLlm(row, mint);
+
+  // ── Entry signal evaluation ─────────────────────────────────────────────
+  // Guard: skip if Stoch RSI data looks invalid (K=0 or null = likely bad candle data)
+  if (!Number.isFinite(lastK) || (lastK === 0 && lastD === 0)) {
+    // Stoch RSI returned garbage — skip entry eval this tick
+    return;
+  }
   if (isInCooldown(mint)) return;
 
   // ── Entry signal evaluation ─────────────────────────────────────────────
