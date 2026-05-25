@@ -13,17 +13,26 @@ import { watchlistSummary } from './format.js';
 async function editOrSend(query, text, extra = {}) {
   const chatId = query.message?.chat?.id || TELEGRAM_CHAT_ID;
   const messageId = query.message?.message_id;
+  // Truncate text if too long for Telegram (4096 char limit)
+  const safeText = text && text.length > 4000 ? text.slice(0, 4000) + '\n\n<i>(truncated)</i>' : text;
   if (!messageId) {
-    return bot.sendMessage(chatId, text, { parse_mode: 'HTML', disable_web_page_preview: true, ...extra });
+    return bot.sendMessage(chatId, safeText, { parse_mode: 'HTML', disable_web_page_preview: true, ...extra });
   }
   try {
-    return await bot.editMessageText(text, {
+    return await bot.editMessageText(safeText, {
       chat_id: chatId, message_id: messageId,
       parse_mode: 'HTML', disable_web_page_preview: true, ...extra,
     });
   } catch (err) {
     if (/message is not modified/i.test(err.message)) return null;
-    return bot.sendMessage(chatId, text, { parse_mode: 'HTML', disable_web_page_preview: true, ...extra });
+    // If edit fails (e.g. can't edit other user's message), send new message instead
+    try {
+      return await bot.sendMessage(chatId, safeText, { parse_mode: 'HTML', disable_web_page_preview: true, ...extra });
+    } catch (sendErr) {
+      console.log(`[telegram] send fallback failed: ${sendErr.message}`);
+      // Last resort: send without HTML parse mode
+      return bot.sendMessage(chatId, text?.replace(/<[^>]+>/g, '') || 'Error rendering message.').catch(() => null);
+    }
   }
 }
 
@@ -34,7 +43,13 @@ export function setupCallbacks() {
       // ── Menu navigation ──────────────────────────────────────────────────
       if (data === 'menu:main')      return editOrSend(query, mainMenuText(), menuKeyboard());
       if (data === 'menu:agent')     return editOrSend(query, agentText(), agentKeyboard());
-      if (data === 'menu:strategy')  return editOrSend(query, strategyMenuText(), strategyKeyboard());
+      if (data === 'menu:strategy') {
+        try {
+          return editOrSend(query, strategyMenuText(), strategyKeyboard());
+        } catch (err) {
+          return editOrSend(query, `⚠️ Strategy menu error: ${err.message}`, navKeyboard());
+        }
+      }
       if (data === 'menu:positions') return editOrSend(query, positionsText(), navKeyboard());
       if (data === 'menu:watchlist') {
         const rows = listActiveWatchlist();

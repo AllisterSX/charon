@@ -52,7 +52,16 @@ export function setupTelegram() {
 
   bot.onText(/^\/strategy\b/, (msg) => {
     if (!isAuthorized(msg.chat.id)) return;
-    reply(msg, strategyMenuText(), strategyKeyboard());
+    try {
+      const text = strategyMenuText();
+      const kb = strategyKeyboard();
+      reply(msg, text, kb).catch(err => {
+        // HTML parse error fallback
+        reply(msg, text.replace(/<[^>]+>/g, ''), kb).catch(() => {});
+      });
+    } catch (err) {
+      reply(msg, `⚠️ Strategy error: ${err.message}`);
+    }
   });
 
   bot.onText(/^\/strategies\b/, (msg) => {
