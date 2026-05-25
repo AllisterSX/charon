@@ -1,0 +1,21 @@
+{
+  "name": "apex",
+  "version": "3.0.0",
+  "type": "module",
+  "private": true,
+  "description": "Apex - Solana memecoin trenching bot. Screen → watchlist → confirmed entry → managed exit.",
+  "scripts": {
+    "start": "node index.js",
+    "check": "node --check index.js && node --check src/app.js && node --check src/config.js && node --check src/utils.js && node --check src/format.js && node --check src/liveExecutor.js && node --check src/signals/charonServer.js && node --check src/screening/metricsGate.js && node --check src/screening/llmNarrative.js && node --check src/screening/llmPrompts.js && node --check src/pipeline/screen.js && node --check src/watchlist/manager.js && node --check src/watchlist/monitor.js && node --check src/watchlist/trendDetector.js && node --check src/chart/gmgnChart.js && node --check src/chart/jupiterChart.js && node --check src/chart/adaptiveTimeframe.js && node --check src/chart/indicators.js && node --check src/entry/signalA.js && node --check src/entry/signalB.js && node --check src/entry/orchestrator.js && node --check src/execution/probe.js && node --check src/execution/exits.js && node --check src/execution/positions.js && node --check src/execution/router.js && node --check src/enrichment/gmgn.js && node --check src/enrichment/jupiter.js && node --check src/enrichment/tokenAuthority.js && node --check src/enrichment/twitter.js && node --check src/enrichment/wallets.js && node --check src/filters/holderRisk.js && node --check src/filters/washTrade.js && node --check src/db/connection.js && node --check src/db/settings.js && node --check src/db/candidates.js && node --check src/db/watchlist.js && node --check src/db/positions.js && node --check src/db/blacklist.js && node --check src/db/chartCache.js && node --check src/db/decisions.js && node --check src/db/intents.js && node --check src/db/trades.js && node --check src/telegram/bot.js && node --check src/telegram/send.js && node --check src/telegram/commands.js && node --check src/telegram/menus.js && node --check src/telegram/format.js && node --check src/telegram/callbacks.js && node --check src/telegram/input.js && node --check src/learning/dailyReport.js && node --check src/learning/summary.js",
+    "smoke": "node scripts/smoke-test.js",
+    "init-test": "node scripts/init-test.js"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.98.4",
+    "axios": "^1.7.9",
+    "better-sqlite3": "^12.9.0",
+    "bs58": "^6.0.0",
+    "dotenv": "^16.4.7",
+    "node-telegram-bot-api": "^0.66.0"
+  }
+}
