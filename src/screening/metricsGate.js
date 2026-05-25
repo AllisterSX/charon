@@ -12,7 +12,6 @@ export function gateCandidate(candidate, strat) {
   const holderCount = Number(candidate.metrics?.holderCount || 0);
   const top10 = Number(candidate.holders?.top10Percent || 0);
   const maxHolder = Number(candidate.holders?.maxHolderPercent || 0);
-  const feeSol = Number(candidate.feeClaim?.distributedSol || 0);
   const sourceCount = Number(candidate.signals?.sourceCount || 0);
 
   // 1) Source count
@@ -66,13 +65,30 @@ export function gateCandidate(candidate, strat) {
     failures.push(`max_top_holder_percent: ${maxHolder.toFixed(1)} > ${strat.max_top20_holder_percent}`);
   }
 
-  // 8) Fee/mcap ratio (Obicle 1:10K rule). Skip if no fee data.
+  // 8) Fee/mcap ratio — Obicle 1:10K rule.
+  // Uses TOTAL fees (gmgnTotalFeesSol) as primary — this is the total trading fees
+  // the token has generated. Falls back to claimed fees (feeClaim.distributedSol)
+  // if GMGN data unavailable. Ratio: fee_sol / mcap_usd.
+  // Example: 10 SOL fees / $100K mcap = 0.0001 → passes at ratio 0.0001.
+  const totalFeesSol = Number(candidate.metrics?.gmgnTotalFeesSol || 0);
+  const claimedFeesSol = Number(candidate.feeClaim?.distributedSol || 0);
+  const effectiveFeeSol = totalFeesSol > 0 ? totalFeesSol : claimedFeesSol;
   const ratioMin = Number(strat.fee_to_mcap_min_ratio || 0);
-  if (ratioMin > 0 && feeSol > 0 && mcap > 0) {
-    const ratio = feeSol / mcap;
-    if (ratio < ratioMin) {
-      failures.push(`fee_to_mcap_min_ratio: ${ratio.toExponential(2)} < ${ratioMin.toExponential(2)}`);
+  if (ratioMin > 0 && mcap > 0) {
+    if (effectiveFeeSol <= 0) {
+      // No fee data available — skip check (don't reject tokens without fee info)
+    } else {
+      const ratio = effectiveFeeSol / mcap;
+      if (ratio < ratioMin) {
+        failures.push(`fee_to_mcap_ratio: ${effectiveFeeSol.toFixed(2)} SOL / $${mcap.toFixed(0)} = ${ratio.toExponential(2)} < ${ratioMin.toExponential(2)} (need ${(mcap * ratioMin).toFixed(1)} SOL)`);
+      }
     }
+  }
+
+  // 8b) Absolute minimum fee floor (optional, per-strategy).
+  const minFeeSol = Number(strat.min_fee_claim_sol || 0);
+  if (minFeeSol > 0 && effectiveFeeSol > 0 && effectiveFeeSol < minFeeSol) {
+    failures.push(`min_fee_sol: ${effectiveFeeSol.toFixed(2)} < ${minFeeSol} SOL`);
   }
 
   // 9) Holder risk score (uses filters/holderRisk evaluation already attached)

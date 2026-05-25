@@ -315,12 +315,13 @@ function seedStrategies() {
 
     // Metrics gate (FR-2)
     max_mcap_usd: 100000,
-    min_mcap_usd: 0,
-    token_age_min_ms: 0,
-    token_age_max_ms: 3600000,                  // 1h
+    min_mcap_usd: 100000,
+    token_age_min_ms: 3600000,                  // 1h minimum (Obicle: post-insider-unwind)
+    token_age_max_ms: 86400000,                 // 24h max
     min_holders: 50,
     max_top10_holder_percent: 65,
-    fee_to_mcap_min_ratio: 0.0001,
+    fee_to_mcap_min_ratio: 0.0001,              // Obicle 1:10K → 10 SOL per $100K mcap
+    min_fee_claim_sol: 0,                       // optional absolute floor (0 = disabled)
     require_mint_authority_revoked: true,
     holder_risk_reject_score: 0.90,
     min_source_count: 2,
