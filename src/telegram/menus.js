@@ -330,7 +330,7 @@ export function candidateButtons(candidateId, decision = null) {
       inline_keyboard: [
         [
           { text: 'View Candidate', callback_data: `cand:${candidateId}` },
-          { text: 'Dry Buy', callback_data: `buy:${candidateId}` },
+          { text: 'Buy', callback_data: `buy:${candidateId}` },
         ],
         [
           { text: 'Set TP/SL', callback_data: `tpsl:c:${candidateId}` },
@@ -354,11 +354,13 @@ export function batchRevealButtons(batchId, rows, decision, triggerCandidateId =
 }
 
 export function positionButtons(positionId) {
+  const mode = tradingMode();
+  const sellLabel = mode === 'live' ? 'Sell' : 'Dry Sell';
   return {
     reply_markup: {
       inline_keyboard: [
         [
-          { text: 'Dry Sell', callback_data: `sell:${positionId}` },
+          { text: sellLabel, callback_data: `sell:${positionId}` },
           { text: 'Refresh', callback_data: `pos:${positionId}` },
         ],
         [
