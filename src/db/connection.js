@@ -398,6 +398,9 @@ function seedStrategies() {
     gmgn_trending_max_age_ms: 604800000,         // 7d
     gmgn_trending_min_holders: 500,
     gmgn_trending_min_fees_sol: 5,               // 5 SOL total fees
+    gmgn_trending_bypass_llm: true,              // bypass LLM for GMGN trending (strict checks)
+    gmgn_bypass_max_top10: 40,                   // max top10 holder % for bypass
+    gmgn_bypass_max_single_holder: 35,           // max single holder % for bypass
   }), ts);
 }
 

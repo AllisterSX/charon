@@ -58,6 +58,23 @@ export async function processSignal(envelope) {
   }
 
   // LLM narrative screen.
+  // GMGN trending tokens with strict pre-filter bypass LLM (already vetted by
+  // holders 500+, fees 5+ SOL, mcap 50K-5M). Additional checks: bundle ≤40%, bot ≤35%.
+  const sources = candidate.signals?.sources || [];
+  const isGmgnTrending = sources.includes('gmgn_trending');
+  const bypassLlm = isGmgnTrending && shouldBypassLlm(candidate, strat);
+
+  if (bypassLlm) {
+    const verdict = {
+      verdict: 'WATCH', narrative_score: 55, viral_potential: 50,
+      narrative_summary: 'GMGN trending bypass (pre-filtered: holders/fees/concentration OK)',
+      risks: ['gmgn_trending_bypass'],
+      reason: 'Bypassed LLM — GMGN trending with strict pre-filter passed',
+    };
+    logDecision({ candidateId, mint, strategyId: strat.id, action: 'gmgn_bypass_llm', payload: { verdict } });
+    return admit(candidateId, candidate, verdict, strat);
+  }
+
   if (!strat.use_llm) {
     // LLM disabled by strategy — admit straight to watchlist with neutral verdict.
     const verdict = {
@@ -215,4 +232,37 @@ async function notifyLlmScreen(candidate, verdict, action) {
   ].filter(Boolean).join('\n');
 
   await sendTelegram(text).catch(() => {});
+}
+
+// ── GMGN trending LLM bypass gate ───────────────────────────────────────────
+// Tokens from GMGN trending already passed pre-filter (holders 500+, fees 5+ SOL,
+// mcap 50K-5M). Additional strict checks before bypassing LLM:
+//   - Top10 holder concentration ≤ 40% (bundle risk)
+//   - Bot/bundler rate ≤ 35%
+//   - Holder risk score < 0.70 (stricter than normal 0.90)
+//   - No wash trade flag
+function shouldBypassLlm(candidate, strat) {
+  // Check if bypass is enabled in strategy
+  if (strat.gmgn_trending_bypass_llm === false) return false;
+
+  const top10 = Number(candidate.holders?.top10Percent || 0);
+  const maxHolder = Number(candidate.holders?.maxHolderPercent || 0);
+  const holderRisk = candidate.holderRisk;
+  const washTrade = candidate.washTrade;
+
+  // Strict concentration check: top10 ≤ 40%
+  const maxBundle = Number(strat.gmgn_bypass_max_top10 || 40);
+  if (top10 > 0 && top10 > maxBundle) return false;
+
+  // Single holder ≤ 35%
+  const maxBot = Number(strat.gmgn_bypass_max_single_holder || 35);
+  if (maxHolder > 0 && maxHolder > maxBot) return false;
+
+  // Holder risk score stricter threshold
+  if (holderRisk?.checked && holderRisk.riskScore >= 0.70) return false;
+
+  // No wash trade
+  if (washTrade?.checked && washTrade.flags?.includes('source_flagged_wash_trading')) return false;
+
+  return true;
 }
