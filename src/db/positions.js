@@ -131,7 +131,8 @@ export function createProbePosition(candidateId, candidate, decision, reason = '
 }
 
 // Add-on after probe confirmed: buy remaining (100 - probe_size_pct)%.
-export function executeProbeAddon(positionId) {
+// For live positions, executes actual Jupiter swap.
+export async function executeProbeAddon(positionId) {
   const position = db.prepare('SELECT * FROM dry_run_positions WHERE id = ?').get(positionId);
   if (!position || position.probe_state !== 'confirmed') return;
   const strat = activeStrategy();
@@ -140,15 +141,45 @@ export function executeProbeAddon(positionId) {
   const addonSize = +(fullSize - probeSize).toFixed(6);
   if (addonSize <= 0) return;
 
-  const newTotalSize = +(probeSize + addonSize).toFixed(6);
-  db.prepare(`
-    UPDATE dry_run_positions SET size_sol = ?, addon_size_sol = ?, addon_at_ms = ? WHERE id = ?
-  `).run(newTotalSize, addonSize, now(), positionId);
-  db.prepare(`
-    INSERT INTO dry_run_trades (position_id, mint, side, at_ms, price, mcap, size_sol, token_amount_est, reason, payload_json)
-    VALUES (?, ?, 'buy', ?, ?, ?, ?, ?, 'probe_addon', ?)
-  `).run(positionId, position.mint, now(), position.high_water_price, position.high_water_mcap, addonSize, null, json({ probeSize, addonSize, fullSize }));
-  console.log(`[probe] addon #${positionId} +${addonSize} SOL (total ${newTotalSize})`);
+  if (position.execution_mode === 'live') {
+    // Live addon: execute Jupiter swap
+    try {
+      const { executeJupiterSwap, fetchLiveTokenBalance } = await import('../liveExecutor.js');
+      const { WSOL_MINT } = await import('../config.js');
+      const addonLamports = Math.floor(addonSize * 1_000_000_000);
+      const swap = await executeJupiterSwap({
+        inputMint: WSOL_MINT,
+        outputMint: position.mint,
+        amount: addonLamports,
+      });
+      const newTokenAmount = await fetchLiveTokenBalance(position.mint) || null;
+      const newTotalSize = +(probeSize + addonSize).toFixed(6);
+      db.prepare(`
+        UPDATE dry_run_positions
+        SET size_sol = ?, addon_size_sol = ?, addon_at_ms = ?, token_amount_raw = COALESCE(?, token_amount_raw)
+        WHERE id = ?
+      `).run(newTotalSize, addonSize, now(), newTokenAmount, positionId);
+      db.prepare(`
+        INSERT INTO dry_run_trades (position_id, mint, side, at_ms, price, mcap, size_sol, token_amount_est, reason, payload_json)
+        VALUES (?, ?, 'buy', ?, ?, ?, ?, ?, 'probe_addon_live', ?)
+      `).run(positionId, position.mint, now(), position.high_water_price, position.high_water_mcap, addonSize, null, json({ probeSize, addonSize, fullSize, swap: { signature: swap.signature } }));
+      console.log(`[probe] live addon #${positionId} +${addonSize} SOL (total ${newTotalSize}) tx=${swap.signature?.slice(0, 8)}`);
+    } catch (err) {
+      console.log(`[probe] live addon #${positionId} FAILED: ${err.message}`);
+      // Still mark as confirmed even if addon fails — position stays at probe size
+    }
+  } else {
+    // Dry-run addon: just update DB
+    const newTotalSize = +(probeSize + addonSize).toFixed(6);
+    db.prepare(`
+      UPDATE dry_run_positions SET size_sol = ?, addon_size_sol = ?, addon_at_ms = ? WHERE id = ?
+    `).run(newTotalSize, addonSize, now(), positionId);
+    db.prepare(`
+      INSERT INTO dry_run_trades (position_id, mint, side, at_ms, price, mcap, size_sol, token_amount_est, reason, payload_json)
+      VALUES (?, ?, 'buy', ?, ?, ?, ?, ?, 'probe_addon', ?)
+    `).run(positionId, position.mint, now(), position.high_water_price, position.high_water_mcap, addonSize, null, json({ probeSize, addonSize, fullSize }));
+    console.log(`[probe] addon #${positionId} +${addonSize} SOL (total ${newTotalSize})`);
+  }
 }
 
 export function createLivePosition(candidateId, candidate, decision, swap, reason = 'live_buy') {

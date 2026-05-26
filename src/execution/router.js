@@ -17,7 +17,11 @@ import { createTradeIntent } from '../db/intents.js';
 
 export async function executeLiveBuy(selectedRow, decision, batchId, rows = [], triggerCandidateId = null) {
   const strat = activeStrategy();
-  const amountLamports = Math.floor((strat.position_size_sol ?? numSetting('dry_run_buy_sol', 0.1)) * 1_000_000_000);
+  const fullSize = strat.position_size_sol ?? numSetting('dry_run_buy_sol', 0.1);
+  const useProbe = strat.probe_enabled === true;
+  const probePct = Number(strat.probe_size_pct ?? 25);
+  const buySize = useProbe ? +(fullSize * probePct / 100).toFixed(6) : fullSize;
+  const amountLamports = Math.floor(buySize * 1_000_000_000);
   const balance = await liveWalletBalanceLamports();
   if (balance < amountLamports + LIVE_MIN_SOL_RESERVE_LAMPORTS) {
     throw new Error(`Insufficient SOL balance. Need ${fmtSol((amountLamports + LIVE_MIN_SOL_RESERVE_LAMPORTS) / 1_000_000_000)} SOL including reserve.`);
@@ -31,6 +35,15 @@ export async function executeLiveBuy(selectedRow, decision, batchId, rows = [], 
     swap.outputAmount = await fetchLiveTokenBalance(selectedRow.candidate.token.mint) || swap.outputAmount;
   }
   const positionId = createLivePosition(selectedRow.id, selectedRow.candidate, decision, swap, `live_batch_${batchId}`);
+  // If probe enabled, mark position with probe state and correct sizes
+  if (useProbe) {
+    db.prepare(`
+      UPDATE dry_run_positions
+      SET probe_state = 'open', probe_size_sol = ?, size_sol = ?
+      WHERE id = ?
+    `).run(buySize, buySize, positionId);
+    console.log(`[probe] live opened #${positionId} ${selectedRow.candidate.token.symbol || selectedRow.candidate.token.mint.slice(0, 8)} probe ${buySize} SOL (${probePct}% of ${fullSize})`);
+  }
   logDecisionEvent({
     batchId,
     triggerCandidateId,
@@ -38,9 +51,9 @@ export async function executeLiveBuy(selectedRow, decision, batchId, rows = [], 
     rows,
     decision,
     mode: 'live',
-    action: 'live_entry_executed',
+    action: useProbe ? 'live_probe_entry' : 'live_entry_executed',
     guardrails: { balanceLamports: balance, amountLamports, minReserveLamports: LIVE_MIN_SOL_RESERVE_LAMPORTS },
-    execution: { positionId, swap },
+    execution: { positionId, swap, probe: useProbe, buySize, fullSize },
   });
   await sendPositionOpen(positionId);
 }
