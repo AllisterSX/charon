@@ -94,9 +94,12 @@ export function createProbePosition(candidateId, candidate, decision, reason = '
   const trailingPercent = strat.trailing_percent ?? numSetting('default_trailing_percent', 20);
 
   return db.transaction(() => {
+    // Prevent duplicate: any position on this mint that's open OR opened in last 5 min
     const existing = db.prepare(`
-      SELECT id FROM dry_run_positions WHERE mint = ? AND status = 'open' LIMIT 1
-    `).get(candidate.token.mint);
+      SELECT id FROM dry_run_positions
+      WHERE mint = ? AND (status = 'open' OR opened_at_ms > ?)
+      LIMIT 1
+    `).get(candidate.token.mint, now() - 300000);
     if (existing) return existing.id;
 
     const result = db.prepare(`
