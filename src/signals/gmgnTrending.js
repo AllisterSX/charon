@@ -21,13 +21,16 @@ function getConfig() {
     timeframe: strat.gmgn_trending_timeframe || '5m',
     limit: Number(strat.gmgn_trending_limit || 50),
     orderby: strat.gmgn_trending_orderby || 'volume',
-    // Pre-filters (applied before forwarding to pipeline)
-    minMcap: Number(strat.gmgn_trending_min_mcap || 50000),
+    // Pre-filters
+    minMcap: Number(strat.gmgn_trending_min_mcap || 80000),
     maxMcap: Number(strat.gmgn_trending_max_mcap || 5000000),
     minAgeMs: Number(strat.gmgn_trending_min_age_ms || 3600000),       // 1h
     maxAgeMs: Number(strat.gmgn_trending_max_age_ms || 604800000),     // 7d
-    minHolders: Number(strat.gmgn_trending_min_holders || 500),
-    minTotalFeesSol: Number(strat.gmgn_trending_min_fees_sol || 5),
+    minHolders: Number(strat.gmgn_trending_min_holders || 100),
+    // Strict filters
+    maxTop10Rate: Number(strat.gmgn_trending_max_top10_rate || 0.20),   // 20%
+    maxBundlerRate: Number(strat.gmgn_trending_max_bundler_rate || 0.40), // 40%
+    requireNoMint: strat.gmgn_trending_require_no_mint !== false,        // default true
   };
 }
 
@@ -82,17 +85,34 @@ export async function fetchGmgnTrending() {
       const key = `gmgn:${mint}`;
       if (seenTrending.has(key)) { processed++; continue; }
 
-      // Pre-filter before forwarding (saves enrichment API calls)
-      const mcap = Number(row.market_cap ?? row.mcap ?? 0);
-      const holders = Number(row.holder_count ?? row.holders ?? 0);
-      const totalFees = Number(row.total_fee ?? row.fees ?? 0);
-      const createdAt = Number(row.creation_timestamp ?? row.created_at ?? 0) * 1000;
-      const ageMs = createdAt > 0 ? now() - createdAt : 0;
+      // Pre-filter using GMGN response fields directly.
+      // Fields confirmed available: market_cap, holder_count, volume, creation_timestamp,
+      // top_10_holder_rate (decimal), bundler_rate (decimal), is_wash_trading, renounced_mint.
+      const mcap = Number(row.market_cap ?? 0);
+      const holders = Number(row.holder_count ?? 0);
+      const volume = Number(row.volume ?? 0);
+      const createdAt = Number(row.creation_timestamp ?? 0);
+      const ageMs = createdAt > 0 ? (now() - createdAt * 1000) : 0;
+      const top10Rate = Number(row.top_10_holder_rate ?? 0);       // decimal (0.20 = 20%)
+      const bundlerRate = Number(row.bundler_rate ?? 0);           // decimal
+      const isWashTrading = row.is_wash_trading === true;
+      const noMint = Number(row.renounced_mint ?? 0) === 1;
 
+      // Hard filters (from strategy config)
       if (mcap > 0 && (mcap < cfg.minMcap || mcap > cfg.maxMcap)) { processed++; continue; }
       if (holders > 0 && holders < cfg.minHolders) { processed++; continue; }
-      if (totalFees > 0 && totalFees < cfg.minTotalFeesSol) { processed++; continue; }
       if (ageMs > 0 && (ageMs < cfg.minAgeMs || ageMs > cfg.maxAgeMs)) { processed++; continue; }
+
+      // Strict filters: top10, bundler, wash trade, NoMint
+      const maxTop10 = Number(cfg.maxTop10Rate || 0.20);           // default 20%
+      if (top10Rate > 0 && top10Rate > maxTop10) { processed++; continue; }
+
+      const maxBundler = Number(cfg.maxBundlerRate || 0.40);       // default 40%
+      if (bundlerRate > 0 && bundlerRate > maxBundler) { processed++; continue; }
+
+      if (isWashTrading) { processed++; continue; }
+
+      if (cfg.requireNoMint && !noMint) { processed++; continue; }
 
       seenTrending.set(key, now());
       recordSignalEvent(mint, row);

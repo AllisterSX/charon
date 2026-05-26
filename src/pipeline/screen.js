@@ -1,17 +1,20 @@
-// Pipeline orchestrator: signal envelope → enrichment → metricsGate → LLM → watchlist.
+// Pipeline v2: signal → enrichment → metrics gate → TA check → probe entry.
+// No watchlist, no LLM. Direct from screening to entry.
 //
-// Single function `processSignal(envelope)` is the candidateHandler attached to
-// the Charon signal poller. Shape of envelope (from signals/charonServer):
-//   { mint, ageMs, sourceCount, sources, name, symbol, priceUsd, marketCapUsd,
-//     liquidityUsd, holders, volume5m, volume24h, trending, graduated, feeClaim, raw }
+// Flow:
+//   1. Signal arrives (Charon 30s / GMGN trending 60s)
+//   2. Dedup + blacklist check
+//   3. Enrichment (GMGN token info + Jupiter holders + authority)
+//   4. Metrics gate (mcap/age/holders/concentration/authority/wash)
+//   5. Fetch candles → compute TA → evaluate Signal A / Signal B
+//   6. If signal fires → openProbe()
+//   7. If not → skip, try again next cycle
 
 import { now } from '../utils.js';
 import { activeStrategy, boolSetting } from '../db/settings.js';
 import { upsertCandidate, latestCandidateByMint, updateCandidateStatus } from '../db/candidates.js';
-import { isWatchlisted, admitOrEvict } from '../watchlist/manager.js';
 import { isBlacklisted } from '../db/blacklist.js';
 import { gateCandidate } from '../screening/metricsGate.js';
-import { screenNarrative } from '../screening/llmNarrative.js';
 import { recordLlmDecision, logDecision } from '../db/decisions.js';
 import { evaluateHolderRisk } from '../filters/holderRisk.js';
 import { evaluateWashTrade } from '../filters/washTrade.js';
@@ -20,22 +23,45 @@ import { fetchJupiterAsset, fetchJupiterHolders } from '../enrichment/jupiter.js
 import { fetchTokenAuthority } from '../enrichment/tokenAuthority.js';
 import { fetchTwitterNarrative } from '../enrichment/twitter.js';
 import { sendTelegram } from '../telegram/send.js';
+import { fetchCandlesAdaptive } from '../chart/jupiterChart.js';
+import { pickTimeframe } from '../chart/adaptiveTimeframe.js';
+import { ema, stochRsi } from '../chart/indicators.js';
+import { evaluateSignalA } from '../entry/signalA.js';
+import { evaluateSignalB } from '../entry/signalB.js';
+import { openPositionCount, lastPositionForMint } from '../db/positions.js';
+import { openProbe } from '../execution/probe.js';
+import { mean } from '../utils.js';
+
+// Track recently-evaluated mints to avoid re-evaluating TA every 30s for same token
+const recentTaEval = new Map();
+const TA_EVAL_COOLDOWN_MS = 120_000; // 2 min between TA evals for same mint
 
 export async function processSignal(envelope) {
   const mint = envelope.mint;
   if (!mint) return;
   if (isBlacklisted(mint)) return;
-  if (isWatchlisted(mint)) return;     // already on watchlist; ticker handles updates
+
+  // Skip if we recently evaluated TA for this mint (avoid hammering Jupiter chart)
+  const lastEval = recentTaEval.get(mint);
+  if (lastEval && now() - lastEval < TA_EVAL_COOLDOWN_MS) return;
+
+  // Skip if already have open position on this mint
+  const lastPos = lastPositionForMint(mint);
+  if (lastPos && ['open', 'probe_open', 'probe_confirmed', 'probe_inconclusive'].includes(lastPos.status)) return;
+
+  // Check max positions
+  const strat = activeStrategy();
+  const maxPos = Number(strat.max_open_positions ?? 10);
+  if (openPositionCount() >= maxPos) return;
 
   // Build enriched candidate snapshot.
   const candidate = await buildCandidate(envelope);
 
-  // Run defensive filter evaluations (attached to candidate).
+  // Run defensive filter evaluations.
   candidate.holderRisk = evaluateHolderRisk(candidate);
   candidate.washTrade  = evaluateWashTrade(candidate);
 
-  // Hard gate.
-  const strat = activeStrategy();
+  // Metrics gate.
   const gate = gateCandidate(candidate, strat);
   candidate.filters = {
     passed: gate.passed,
@@ -44,7 +70,7 @@ export async function processSignal(envelope) {
     checkedAtMs: now(),
   };
 
-  // Persist the candidate row no matter what.
+  // Persist candidate row.
   const candidateId = upsertCandidate(candidate, envelope.feeClaim?.signature || null);
 
   if (!gate.passed) {
@@ -57,86 +83,102 @@ export async function processSignal(envelope) {
     return;
   }
 
-  // LLM narrative screen.
-  // GMGN trending tokens with strict pre-filter bypass LLM (already vetted by
-  // holders 500+, fees 5+ SOL, mcap 50K-5M). Additional checks: bundle ≤40%, bot ≤35%.
-  const sources = candidate.signals?.sources || [];
-  const isGmgnTrending = sources.includes('gmgn_trending');
-  const bypassLlm = isGmgnTrending && shouldBypassLlm(candidate, strat);
-
-  if (bypassLlm) {
-    const verdict = {
-      verdict: 'WATCH', narrative_score: 55, viral_potential: 50,
-      narrative_summary: 'GMGN trending bypass (pre-filtered: holders/fees/concentration OK)',
-      risks: ['gmgn_trending_bypass'],
-      reason: 'Bypassed LLM — GMGN trending with strict pre-filter passed',
-    };
-    logDecision({ candidateId, mint, strategyId: strat.id, action: 'gmgn_bypass_llm', payload: { verdict } });
-    return admit(candidateId, candidate, verdict, strat);
+  // ── Direct TA evaluation (no watchlist, no LLM) ─────────────────────────
+  recentTaEval.set(mint, now());
+  // Prune old entries
+  if (recentTaEval.size > 500) {
+    for (const [k, v] of recentTaEval) { if (now() - v > TA_EVAL_COOLDOWN_MS * 2) recentTaEval.delete(k); }
   }
 
-  if (!strat.use_llm) {
-    // LLM disabled by strategy — admit straight to watchlist with neutral verdict.
-    const verdict = {
-      verdict: 'WATCH', narrative_score: 50, viral_potential: 0,
-      narrative_summary: '', risks: ['llm_disabled_by_strategy'],
-      reason: 'LLM disabled by strategy', unverified: true,
-    };
-    return admit(candidateId, candidate, verdict, strat);
-  }
+  const ageMs = Number(candidate.signals?.ageMs || 0);
+  const tf = pickTimeframe(ageMs);
+  const { candles } = await fetchCandlesAdaptive(mint, tf, 80);
 
-  const verdict = await screenNarrative(candidate, strat);
-  recordLlmDecision({ candidateId, mint, kind: 'screen', verdict });
-
-  if (verdict.verdict === 'PASS') {
-    updateCandidateStatus(candidateId, 'rejected_llm_pass');
-    logDecision({ candidateId, mint, strategyId: strat.id, action: 'llm_pass', reason: verdict.reason, payload: { verdict } });
-    notifyLlmScreen(candidate, verdict, 'PASS').catch(() => {});
+  if (!candles || candles.length < 25) {
+    logDecision({ candidateId, mint, strategyId: strat.id, action: 'ta_skip_insufficient_candles', payload: { candleCount: candles?.length || 0, tf } });
     return;
   }
-  if (verdict.verdict === 'REJECT') {
-    updateCandidateStatus(candidateId, 'rejected_llm_reject');
-    logDecision({ candidateId, mint, strategyId: strat.id, action: 'llm_reject', reason: verdict.reason, payload: { verdict } });
-    notifyLlmScreen(candidate, verdict, 'REJECT').catch(() => {});
-    const { addBlacklist } = await import('../db/blacklist.js');
-    addBlacklist(mint, verdict.reason || 'llm_reject');
+
+  const closes = candles.map(c => Number(c.c));
+  const vols = candles.map(c => Number(c.v || 0));
+  const ema20Arr = ema(closes, 20);
+  const sr = stochRsi(closes, 14, 3, 3);
+  const lastK = sr?.k?.[closes.length - 1];
+  const lastD = sr?.d?.[closes.length - 1];
+
+  // Guard: skip if Stoch RSI data looks invalid
+  if (!Number.isFinite(lastK) || (lastK === 0 && lastD === 0)) {
+    logDecision({ candidateId, mint, strategyId: strat.id, action: 'ta_skip_invalid_stoch', payload: { lastK, lastD } });
     return;
   }
-  // WATCH (or unverified)
-  if (Number(verdict.narrative_score || 0) < Number(strat.llm_min_narrative_score || 0)
-      && !verdict.unverified) {
-    updateCandidateStatus(candidateId, 'rejected_low_narrative');
-    logDecision({ candidateId, mint, strategyId: strat.id, action: 'narrative_below_min', payload: { score: verdict.narrative_score, min: strat.llm_min_narrative_score } });
-    notifyLlmScreen(candidate, verdict, 'LOW_SCORE').catch(() => {});
+
+  // Evaluate Signal A
+  let entrySignal = null;
+  let evaluation = null;
+
+  if (strat.sigA_enabled !== false) {
+    const a = evaluateSignalA({ candles, ema20Arr, sr, strat });
+    if (a.entry) {
+      entrySignal = 'A';
+      evaluation = a;
+    }
+  }
+
+  // Evaluate Signal B (if A didn't fire)
+  if (!entrySignal && strat.sigB_enabled !== false) {
+    const last = closes.length - 1;
+    // Compute ATH and trough from candles
+    let athPrice = 0, athAt = 0, troughPrice = Infinity, troughAt = 0;
+    for (const c of candles) {
+      if (Number(c.h) > athPrice) { athPrice = Number(c.h); athAt = Number(c.t); }
+    }
+    for (const c of candles) {
+      if (Number(c.t) >= athAt && Number(c.l) > 0 && Number(c.l) < troughPrice) {
+        troughPrice = Number(c.l); troughAt = Number(c.t);
+      }
+    }
+    const ath = { price: athPrice, at: athAt };
+    const trough = troughPrice < Infinity ? { price: troughPrice, at: troughAt } : { price: null, at: null };
+
+    const b = evaluateSignalB({ candles, vols, ath, trough, strat });
+    if (b.entry) {
+      entrySignal = 'B';
+      evaluation = b;
+    }
+  }
+
+  if (!entrySignal) {
+    updateCandidateStatus(candidateId, 'ta_no_signal');
+    logDecision({ candidateId, mint, strategyId: strat.id, action: 'ta_no_signal', payload: { tf, lastK, candles: candles.length } });
     return;
   }
-  return admit(candidateId, candidate, verdict, strat);
+
+  // ── Entry! Open probe ───────────────────────────────────────────────────
+  updateCandidateStatus(candidateId, 'entry_signal');
+  logDecision({
+    candidateId, mint, strategyId: strat.id,
+    action: `entry_signal_${entrySignal}`,
+    payload: { tf, signal: entrySignal, metrics: evaluation?.metrics },
+  });
+
+  const positionId = await openProbe({
+    candidate,
+    candidateId,
+    watchlistRow: null,
+    signal: entrySignal,
+    tf,
+    evaluation,
+    candles,
+    strat,
+  });
+
+  console.log(`[entry] ${candidate.token?.symbol || mint.slice(0, 8)} signal ${entrySignal} → probe #${positionId} (${tf})`);
 }
 
-async function admit(candidateId, candidate, verdict, strat) {
-  const result = admitOrEvict(candidateId, candidate, verdict);
-  if (result.admitted) {
-    updateCandidateStatus(candidateId, 'watchlisted');
-    logDecision({
-      candidateId, mint: candidate.token.mint, strategyId: strat.id,
-      action: 'watchlist_admit',
-      reason: verdict.reason,
-      payload: { evicted: result.evicted, score: verdict.narrative_score },
-    });
-  } else {
-    updateCandidateStatus(candidateId, 'watchlist_full');
-    logDecision({
-      candidateId, mint: candidate.token.mint, strategyId: strat.id,
-      action: 'watchlist_admission_denied',
-      reason: result.reason,
-      payload: { score: verdict.narrative_score },
-    });
-  }
-}
+// ── Candidate builder ────────────────────────────────────────────────────────
 
 async function buildCandidate(envelope) {
   const mint = envelope.mint;
-  // Parallel fetches.
   const [gmgn, asset, holders, authority] = await Promise.all([
     fetchGmgnTokenInfo(mint).catch(() => null),
     fetchJupiterAsset(mint).catch(() => null),
@@ -145,7 +187,6 @@ async function buildCandidate(envelope) {
       ? fetchTokenAuthority(mint).catch(() => null)
       : Promise.resolve(null),
   ]);
-  const twitterNarrative = await fetchTwitterNarrative(envelope.graduated || envelope, gmgn).catch(() => null);
 
   const previous = latestCandidateByMint(mint);
   const baseToken = previous?.candidate?.token || {};
@@ -182,14 +223,9 @@ async function buildCandidate(envelope) {
     trending: envelope.trending || null,
     graduation: envelope.graduated || null,
     holders: holders || { count: 0, holders: [], top10: [], top20: [] },
-    chart: {
-      currentNative: null,
-      rangeHighNative: null,
-      distanceFromAthPercent: null,
-      topBlastRisk: null,
-    },
+    chart: { currentNative: null, rangeHighNative: null, distanceFromAthPercent: null, topBlastRisk: null },
     authority: authority || { checked: false },
-    twitterNarrative,
+    twitterNarrative: null,  // skip twitter fetch for speed
     savedWalletExposure: { holderCount: 0, checked: 0, wallets: [] },
   };
   return candidate;
@@ -201,68 +237,4 @@ function routeFromEnvelope(envelope) {
   if (envelope.graduated) flags.push('graduated');
   if (envelope.trending) flags.push('trending');
   return flags.join('+') || 'signal';
-}
-
-// ── Telegram notification for LLM screening decisions ────────────────────────
-async function notifyLlmScreen(candidate, verdict, action) {
-  const symbol = candidate.token?.symbol || candidate.token?.name || candidate.token?.mint?.slice(0, 8) || '?';
-  const mint = candidate.token?.mint || '';
-  const short = mint.length > 10 ? `${mint.slice(0, 6)}...${mint.slice(-4)}` : mint;
-  const score = verdict.narrative_score ?? '?';
-  const viral = verdict.viral_potential ?? '?';
-  const reason = verdict.reason ? String(verdict.reason).slice(0, 200) : '';
-  const mcap = candidate.metrics?.marketCapUsd;
-  const mcapStr = mcap ? (mcap >= 1e6 ? `$${(mcap/1e6).toFixed(1)}M` : mcap >= 1e3 ? `$${(mcap/1e3).toFixed(1)}K` : `$${mcap}`) : '?';
-  const source = (candidate.signals?.sources || []).join('+') || candidate.signals?.route || '?';
-
-  const esc = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-
-  let emoji, label;
-  if (action === 'REJECT')    { emoji = '🚫'; label = 'REJECT (blacklisted)'; }
-  else if (action === 'PASS') { emoji = '⏭'; label = 'PASS (skipped)'; }
-  else                        { emoji = '📉'; label = `LOW SCORE (${score} &lt; min)`; }
-
-  const text = [
-    `${emoji} <b>LLM: ${label}</b>`,
-    `${esc(symbol)}  ${mcapStr}  via ${esc(source)}`,
-    `<a href="https://gmgn.ai/sol/token/${mint}">${short}</a>`,
-    `Score: <b>${score}</b>  Viral: <b>${viral}</b>`,
-    reason ? `"${esc(reason)}"` : null,
-    verdict.risks?.length ? `Risks: ${verdict.risks.slice(0, 4).map(esc).join(', ')}` : null,
-  ].filter(Boolean).join('\n');
-
-  await sendTelegram(text).catch(() => {});
-}
-
-// ── GMGN trending LLM bypass gate ───────────────────────────────────────────
-// Tokens from GMGN trending already passed pre-filter (holders 500+, fees 5+ SOL,
-// mcap 50K-5M). Additional strict checks before bypassing LLM:
-//   - Top10 holder concentration ≤ 40% (bundle risk)
-//   - Bot/bundler rate ≤ 35%
-//   - Holder risk score < 0.70 (stricter than normal 0.90)
-//   - No wash trade flag
-function shouldBypassLlm(candidate, strat) {
-  // Check if bypass is enabled in strategy
-  if (strat.gmgn_trending_bypass_llm === false) return false;
-
-  const top10 = Number(candidate.holders?.top10Percent || 0);
-  const maxHolder = Number(candidate.holders?.maxHolderPercent || 0);
-  const holderRisk = candidate.holderRisk;
-  const washTrade = candidate.washTrade;
-
-  // Strict concentration check: top10 ≤ 40%
-  const maxBundle = Number(strat.gmgn_bypass_max_top10 || 40);
-  if (top10 > 0 && top10 > maxBundle) return false;
-
-  // Single holder ≤ 35%
-  const maxBot = Number(strat.gmgn_bypass_max_single_holder || 35);
-  if (maxHolder > 0 && maxHolder > maxBot) return false;
-
-  // Holder risk score stricter threshold
-  if (holderRisk?.checked && holderRisk.riskScore >= 0.70) return false;
-
-  // No wash trade
-  if (washTrade?.checked && washTrade.flags?.includes('source_flagged_wash_trading')) return false;
-
-  return true;
 }
