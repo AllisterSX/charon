@@ -22,6 +22,19 @@ export async function executeLiveBuy(selectedRow, decision, batchId, rows = [], 
   const probePct = Number(strat.probe_size_pct ?? 25);
   const buySize = useProbe ? +(fullSize * probePct / 100).toFixed(6) : fullSize;
   const amountLamports = Math.floor(buySize * 1_000_000_000);
+
+  // Prevent duplicate: any position on this mint that's open OR opened in last 5 min
+  const mint = selectedRow.candidate.token.mint;
+  const existing = db.prepare(`
+    SELECT id FROM dry_run_positions
+    WHERE mint = ? AND (status = 'open' OR opened_at_ms > ?)
+    LIMIT 1
+  `).get(mint, now() - 300000);
+  if (existing) {
+    console.log(`[live] skip duplicate buy for ${mint.slice(0, 8)}... (existing #${existing.id})`);
+    return;
+  }
+
   const balance = await liveWalletBalanceLamports();
   if (balance < amountLamports + LIVE_MIN_SOL_RESERVE_LAMPORTS) {
     throw new Error(`Insufficient SOL balance. Need ${fmtSol((amountLamports + LIVE_MIN_SOL_RESERVE_LAMPORTS) / 1_000_000_000)} SOL including reserve.`);
