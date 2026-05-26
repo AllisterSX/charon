@@ -121,9 +121,16 @@ async function processRow(row, strat) {
   });
 
   // ── Trend-based eviction ────────────────────────────────────────────────
-  // Debounce: only evict if trend has been downtrend for 2+ consecutive ticks.
-  // This prevents noisy 30s candles from causing false evictions.
-  if (trend.status === 'downtrend') {
+  // A) Grace period: tokens admitted less than 5 minutes ago are immune to trend eviction.
+  //    This prevents noisy early candles from immediately kicking fresh admissions.
+  const gracePeriodMs = Number(strat.watchlist_grace_period_ms ?? 300000); // default 5m
+  const admittedAgo = now() - Number(row.added_at_ms || 0);
+  const inGracePeriod = admittedAgo < gracePeriodMs;
+
+  // B) Debounce: only evict if trend has been downtrend for 2+ consecutive ticks.
+  //    Threshold lowered to ≤25 (from ≤35) to reduce false evictions on 30s candles.
+  const evictThreshold = Number(strat.trend_reversal_max_score ?? 35);
+  if (!inGracePeriod && trend.status === 'downtrend' && trend.score <= evictThreshold) {
     const prevTrend = row.trend_status;
     if (prevTrend === 'downtrend') {
       // 2nd consecutive downtrend tick — check no open position before evicting
@@ -131,7 +138,7 @@ async function processRow(row, strat) {
       const lastPos = lastPositionForMint(mint);
       const hasOpenPos = lastPos && ['open', 'probe_open', 'probe_confirmed', 'probe_inconclusive'].includes(lastPos.status);
       if (!hasOpenPos) {
-        removeFromWatchlist(mint, 'trend_reversal', { score: trend.score });
+        removeFromWatchlist(mint, 'trend_reversal', { score: trend.score, admittedAgo: Math.round(admittedAgo / 1000) });
         return;
       }
       // Has open position — keep on watchlist, just update trend status

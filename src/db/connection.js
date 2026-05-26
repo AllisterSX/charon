@@ -340,7 +340,8 @@ function seedStrategies() {
 
     // Trend (FR-4.5, §4.1 Option C)
     trend_uptrend_min_score: 60,
-    trend_reversal_max_score: 35,
+    trend_reversal_max_score: 25,               // lowered from 35 — less aggressive eviction
+    watchlist_grace_period_ms: 300000,           // 5 min grace — no trend eviction for fresh admissions
     trend_weights: {
       ema_stack: 25,
       ema_slope: 20,
