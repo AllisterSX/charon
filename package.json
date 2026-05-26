@@ -1,0 +1,21 @@
+{
+  "name": "charon-v2",
+  "version": "2.0.0-dev",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node index.js",
+    "check": "node --check index.js && node --check src/app.js && node --check src/config.js && node --check src/liveExecutor.js && node --check src/pipeline/candidateBuilder.js && node --check src/pipeline/orchestrator.js && node --check src/execution/positions.js && node --check src/enrichment/tokenAuthority.js && node --check src/filters/holderRisk.js && node --check src/filters/washTrade.js && node --check src/filters/networkCongestion.js && node --check src/filters/technicalAnalysis.js && node --check src/learning/dailyReport.js && node --check src/db/connection.js && node --check src/db/settings.js && node --check src/signals/serverClient.js",
+    "smoke": "node scripts/smoke-test.js",
+    "init-test": "node scripts/init-test.js"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.98.4",
+    "axios": "^1.7.9",
+    "better-sqlite3": "^12.9.0",
+    "bs58": "^6.0.0",
+    "dotenv": "^16.4.7",
+    "node-telegram-bot-api": "^0.66.0",
+    "ws": "^8.18.0"
+  }
+}

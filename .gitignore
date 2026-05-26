@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+node_modules/
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.log
+logs/
+backups/
+.DS_Store
+npm-debug.log*
+
+ARCHITECTURE.md

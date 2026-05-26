@@ -1,0 +1,324 @@
+import { now, json } from '../utils.js';
+import { numSetting, boolSetting, strategyById, activeStrategy } from '../db/settings.js';
+import { db } from '../db/connection.js';
+import { firstPositiveNumber, marketCapFromGmgn, tokenPriceFromGmgn } from '../utils.js';
+import { fetchGmgnTokenInfo } from '../enrichment/gmgn.js';
+import { fetchJupiterAsset, fetchJupiterHolders, fetchJupiterChartContext, fetchJupiterWalletPnl } from '../enrichment/jupiter.js';
+import { fetchTokenAuthority } from '../enrichment/tokenAuthority.js';
+import { evaluateHolderRisk } from '../filters/holderRisk.js';
+import { evaluateWashTrade } from '../filters/washTrade.js';
+import { evaluateTaEntry, evaluateStochRsiSignal } from '../filters/technicalAnalysis.js';
+import { liveWalletPubkey } from '../liveExecutor.js';
+import { fetchSavedWalletExposure } from '../enrichment/wallets.js';
+import { filterCandidate } from '../pipeline/candidateBuilder.js';
+import { openPositions } from '../db/positions.js';
+import { updateCandidateSnapshot } from '../db/candidates.js';
+import { trending } from '../signals/trending.js';
+import { executeLiveSell } from './router.js';
+import { sendPositionExit } from '../telegram/send.js';
+
+export async function freshEntryMarket(mint, candidate) {
+  const gmgn = await fetchGmgnTokenInfo(mint, false);
+  const asset = await fetchJupiterAsset(mint, { useCache: false });
+  const priceUsd = firstPositiveNumber(tokenPriceFromGmgn(gmgn), asset?.usdPrice, candidate.metrics?.priceUsd);
+  const marketCapUsd = firstPositiveNumber(
+    marketCapFromGmgn(gmgn),
+    asset?.mcap,
+    asset?.fdv,
+    candidate.metrics?.marketCapUsd,
+    candidate.metrics?.graduatedMarketCapUsd,
+  );
+  return { gmgn, asset, priceUsd, marketCapUsd, refreshedAtMs: now() };
+}
+
+export async function refreshCandidateForExecution(row) {
+  const candidate = row.candidate;
+  const mint = candidate.token.mint;
+  const gmgn = await fetchGmgnTokenInfo(mint, false);
+  const asset = await fetchJupiterAsset(mint, { useCache: false });
+  const holders = await fetchJupiterHolders(mint);
+  const chart = await fetchJupiterChartContext(mint);
+  const authority = boolSetting('enable_token_authority_guard', true)
+    ? await fetchTokenAuthority(mint, { useCache: false }).catch(() => candidate.authority || { checked: false })
+    : candidate.authority || { checked: false };
+  const selectedTrending = trending.get(mint) || candidate.trending || null;
+  const selectedHolders = holders?.holders?.length ? holders : candidate.holders;
+  const selectedSavedWalletExposure = selectedHolders
+    ? await fetchSavedWalletExposure(mint, selectedHolders)
+    : candidate.savedWalletExposure;
+  const priceUsd = firstPositiveNumber(tokenPriceFromGmgn(gmgn), asset?.usdPrice, selectedTrending?.price, candidate.metrics?.priceUsd);
+  const marketCapUsd = firstPositiveNumber(
+    marketCapFromGmgn(gmgn),
+    asset?.mcap,
+    asset?.fdv,
+    selectedTrending?.market_cap,
+    candidate.metrics?.marketCapUsd,
+    candidate.metrics?.graduatedMarketCapUsd,
+  );
+  const refreshed = {
+    ...candidate,
+    token: {
+      ...candidate.token,
+      name: gmgn?.name || asset?.name || selectedTrending?.name || candidate.token.name,
+      symbol: gmgn?.symbol || asset?.symbol || selectedTrending?.symbol || candidate.token.symbol,
+      twitter: candidate.token.twitter || asset?.twitter || gmgn?.link?.twitter_username || selectedTrending?.twitter || '',
+      website: candidate.token.website || asset?.website || gmgn?.link?.website || '',
+      telegram: candidate.token.telegram || gmgn?.link?.telegram || '',
+    },
+    metrics: {
+      ...candidate.metrics,
+      priceUsd,
+      marketCapUsd,
+      liquidityUsd: Number(gmgn?.liquidity ?? asset?.liquidity ?? selectedTrending?.liquidity ?? candidate.metrics?.liquidityUsd ?? 0),
+      holderCount: Number(gmgn?.holder_count ?? asset?.holderCount ?? selectedTrending?.holder_count ?? candidate.metrics?.holderCount ?? 0),
+      gmgnTotalFeesSol: Number(gmgn?.total_fee ?? asset?.fees ?? candidate.metrics?.gmgnTotalFeesSol ?? 0),
+      gmgnTradeFeesSol: Number(gmgn?.trade_fee ?? candidate.metrics?.gmgnTradeFeesSol ?? 0),
+      trendingVolumeUsd: Number(selectedTrending?.volume ?? candidate.metrics?.trendingVolumeUsd ?? 0),
+      trendingSwaps: Number(selectedTrending?.swaps ?? candidate.metrics?.trendingSwaps ?? 0),
+      trendingHotLevel: Number(selectedTrending?.hot_level ?? candidate.metrics?.trendingHotLevel ?? 0),
+      trendingSmartDegenCount: Number(selectedTrending?.smart_degen_count ?? candidate.metrics?.trendingSmartDegenCount ?? 0),
+    },
+    gmgn,
+    jupiterAsset: asset,
+    trending: selectedTrending,
+    holders: selectedHolders,
+    chart,
+    savedWalletExposure: selectedSavedWalletExposure,
+    authority,
+    networkCongestion: candidate.networkCongestion,
+    executionRefresh: {
+      refreshedAtMs: now(),
+      source: 'pre_execution',
+      marketCapUsd,
+      priceUsd,
+      liquidityUsd: Number(gmgn?.liquidity ?? asset?.liquidity ?? selectedTrending?.liquidity ?? 0),
+      holdersRefreshed: Boolean(holders?.holders?.length),
+    },
+  };
+  refreshed.holderRisk = evaluateHolderRisk(refreshed);
+  refreshed.washTrade = evaluateWashTrade(refreshed);
+  // TA entry confirmation for `ta_confirmed` strategies
+  const stratCfg = activeStrategy();
+  if (stratCfg?.entry_mode === 'ta_confirmed') {
+    refreshed.taEntry = await evaluateTaEntry(refreshed).catch(err => ({ checked: false, error: err.message }));
+  }
+  refreshed.filters = filterCandidate(refreshed);
+  const executionFailures = [];
+  if (!Number.isFinite(Number(refreshed.metrics.marketCapUsd)) || Number(refreshed.metrics.marketCapUsd) <= 0) {
+    executionFailures.push('execution mcap: missing');
+  }
+  if (!Number.isFinite(Number(refreshed.metrics.priceUsd)) || Number(refreshed.metrics.priceUsd) <= 0) {
+    executionFailures.push('execution price: missing');
+  }
+  if (executionFailures.length) {
+    refreshed.filters = {
+      ...refreshed.filters,
+      passed: false,
+      failures: [...(refreshed.filters?.failures || []), ...executionFailures],
+    };
+  }
+  updateCandidateSnapshot(row.id, refreshed, refreshed.filters.passed ? 'candidate' : 'filtered');
+  return { ...row, candidate: refreshed };
+}
+
+const sellInProgress = new Set();
+
+export async function refreshPosition(position, { autoExit = true, jupiterPnl = null } = {}) {
+  const asset = await fetchJupiterAsset(position.mint);
+  const price = firstPositiveNumber(asset?.usdPrice, position.high_water_price, position.entry_price);
+  const mcap = firstPositiveNumber(asset?.mcap, asset?.fdv, position.high_water_mcap, position.entry_mcap);
+  if (!Number.isFinite(Number(mcap)) || !Number.isFinite(Number(position.entry_mcap)) || Number(position.entry_mcap) <= 0) {
+    return null;
+  }
+  const highWaterMcap = Math.max(Number(position.high_water_mcap || 0), Number(mcap));
+  const highWaterPrice = Math.max(Number(position.high_water_price || 0), Number(price || 0));
+  let pnlPercent = (Number(mcap) / Number(position.entry_mcap) - 1) * 100;
+  let pnlSol = Number(position.size_sol) * pnlPercent / 100;
+  if (jupiterPnl && Number.isFinite(Number(jupiterPnl.totalPnlPercentageNative))) {
+    pnlPercent = Number(jupiterPnl.totalPnlPercentageNative);
+    pnlSol = Number.isFinite(Number(jupiterPnl.totalPnlNative)) ? Number(jupiterPnl.totalPnlNative) : pnlSol;
+  }
+  const tpHit = pnlPercent >= Number(position.tp_percent);
+  const slHit = pnlPercent <= Number(position.sl_percent);
+  const trailingArmed = position.trailing_armed || (position.trailing_enabled && tpHit);
+  const trailDrop = highWaterMcap > 0 ? (Number(mcap) / highWaterMcap - 1) * 100 : 0;
+  const trailingHit = trailingArmed && position.trailing_enabled && trailDrop <= -Math.abs(Number(position.trailing_percent));
+  let exitReason = null;
+  let closed = false;
+
+  // ── Probe state machine ─────────────────────────────────────────────────
+  // If position has probe_state = 'open', evaluate before normal exit checks.
+  const strat = strategyById(position.strategy_id);
+  if (position.probe_state === 'open' && strat?.probe_enabled) {
+    const probeAge = now() - Number(position.opened_at_ms);
+    const confirmPnl = Number(strat.probe_confirm_min_pnl_pct ?? 5);
+    const failPnl = Number(strat.probe_fail_max_pnl_pct ?? -10);
+    const maxAge = Number(strat.probe_max_age_ms ?? 300000);
+
+    if (pnlPercent >= confirmPnl) {
+      // Probe confirmed — add-on
+      db.prepare('UPDATE dry_run_positions SET probe_state = ? WHERE id = ?').run('confirmed', position.id);
+      const { executeProbeAddon } = await import('../db/positions.js');
+      executeProbeAddon(position.id);
+      console.log(`[probe] #${position.id} CONFIRMED pnl=${pnlPercent.toFixed(1)}% >= ${confirmPnl}%`);
+      // Continue to normal monitoring with full size
+    } else if (pnlPercent <= failPnl) {
+      // Probe failed — close immediately
+      exitReason = 'PROBE_FAILED';
+      console.log(`[probe] #${position.id} FAILED pnl=${pnlPercent.toFixed(1)}% <= ${failPnl}%`);
+    } else if (probeAge >= maxAge) {
+      // Inconclusive — keep probe-only size, continue normal exit monitoring
+      db.prepare('UPDATE dry_run_positions SET probe_state = ? WHERE id = ?').run('inconclusive', position.id);
+      console.log(`[probe] #${position.id} INCONCLUSIVE age=${Math.round(probeAge/1000)}s, pnl=${pnlPercent.toFixed(1)}%`);
+    }
+    // If still pending (no state change), skip normal exit checks this tick
+    if (!exitReason && position.probe_state === 'open') {
+      db.prepare('UPDATE dry_run_positions SET high_water_mcap = ?, high_water_price = ? WHERE id = ?')
+        .run(highWaterMcap, highWaterPrice, position.id);
+      return { ...position, pnlPercent, pnl_percent: pnlPercent, pnlSol, pnl_sol: pnlSol, exitReason: null };
+    }
+  }
+
+  // Max hold time check
+  if (!exitReason && strat?.max_hold_ms > 0 && (now() - position.opened_at_ms) >= strat.max_hold_ms) {
+    exitReason = 'MAX_HOLD';
+  }
+
+  // Partial TP check
+  if (!exitReason && strat?.partial_tp && !position.partial_tp_done && pnlPercent >= strat.partial_tp_at_percent) {
+    db.prepare('UPDATE dry_run_positions SET partial_tp_done = 1 WHERE id = ?').run(position.id);
+    console.log(`[position] ${position.id} partial TP at ${pnlPercent.toFixed(1)}% (${strat.partial_tp_sell_percent}% sell)`);
+    if (position.execution_mode === 'live' && position.token_amount_raw) {
+      try {
+        const sellAmount = Math.floor(Number(position.token_amount_raw) * (strat.partial_tp_sell_percent / 100));
+        if (sellAmount > 0) {
+          const sell = await executeLiveSell({ ...position, token_amount_raw: String(sellAmount) }, 'PARTIAL_TP');
+          const remaining = Number(position.token_amount_raw) - sellAmount;
+          db.prepare('UPDATE dry_run_positions SET token_amount_raw = ? WHERE id = ?').run(String(remaining), position.id);
+          db.prepare(`
+            INSERT INTO dry_run_trades (position_id, mint, side, at_ms, price, mcap, size_sol, token_amount_est, reason, payload_json)
+            VALUES (?, ?, 'sell', ?, ?, ?, ?, ?, 'PARTIAL_TP', ?)
+          `).run(position.id, position.mint, now(), price, mcap,
+            position.size_sol * (strat.partial_tp_sell_percent / 100), sellAmount,
+            json({ pnlPercent, sell, partialSellPercent: strat.partial_tp_sell_percent, remaining }));
+          console.log(`[position] ${position.id} partial TP sold ${sellAmount} tokens, ${remaining} remaining`);
+        }
+      } catch (err) {
+        console.log(`[position] ${position.id} partial sell failed: ${err.message}`);
+      }
+    }
+  }
+
+  // Standard exit checks
+  if (!exitReason) {
+    if (slHit) exitReason = 'SL';
+    else if (tpHit && !position.trailing_enabled) exitReason = 'TP';
+    else if (trailingHit) exitReason = 'TRAILING_TP';
+  }
+
+  // Stoch RSI exit gate — for strategies using stoch_rsi mode.
+  // Exit when K > overbought (default 80) AND position is in profit.
+  // Only fires if not already exiting via SL/TP/TRAILING.
+  if (!exitReason && strat?.entry_mode === 'stoch_rsi') {
+    try {
+      const overbought = strat.stoch_rsi_overbought ?? 80;
+      const stochSignal = await evaluateStochRsiSignal(position.mint, {
+        interval: '5_MINUTE',
+        overbought,
+      });
+      if (stochSignal.checked && stochSignal.exitSignal && pnlPercent > 0) {
+        exitReason = 'STOCH_RSI_EXIT';
+        console.log(`[position] ${position.id} stoch RSI exit K=${stochSignal.k?.toFixed(1)} > ${overbought}, pnl=${pnlPercent.toFixed(1)}%`);
+      }
+    } catch (err) {
+      console.log(`[position] ${position.id} stoch RSI exit check failed: ${err.message}`);
+    }
+  }
+
+  // Live exits will override these with realized SOL values
+  let finalPnlPercent = pnlPercent;
+  let finalPnlSol = pnlSol;
+
+  db.prepare(`
+    UPDATE dry_run_positions
+    SET high_water_mcap = ?, high_water_price = ?, trailing_armed = ?
+    WHERE id = ?
+  `).run(highWaterMcap, highWaterPrice, trailingArmed ? 1 : 0, position.id);
+
+  if (exitReason && autoExit && position.execution_mode === 'live') {
+    if (sellInProgress.has(position.id)) return { ...position, exitReason: null };
+    sellInProgress.add(position.id);
+    let sell;
+    try {
+      sell = await executeLiveSell(position, exitReason);
+    } finally {
+      sellInProgress.delete(position.id);
+    }
+    const receivedLamports = Number(sell.outputAmount || 0);
+    const receivedSol = receivedLamports > 0 ? receivedLamports / 1_000_000_000 : null;
+    if (receivedSol != null) {
+      finalPnlSol = receivedSol - Number(position.size_sol);
+      finalPnlPercent = (receivedSol / Number(position.size_sol) - 1) * 100;
+    }
+    db.prepare(`
+      UPDATE dry_run_positions
+      SET status = 'closed', closed_at_ms = ?, exit_price = ?, exit_mcap = ?, exit_reason = ?,
+          pnl_percent = ?, pnl_sol = ?, exit_signature = ?
+      WHERE id = ?
+    `).run(now(), price, mcap, exitReason, finalPnlPercent, finalPnlSol, sell.signature, position.id);
+    db.prepare(`
+      INSERT INTO dry_run_trades (position_id, mint, side, at_ms, price, mcap, size_sol, token_amount_est, reason, payload_json)
+      VALUES (?, ?, 'sell', ?, ?, ?, ?, ?, ?, ?)
+    `).run(position.id, position.mint, now(), price, mcap, position.size_sol, position.token_amount_est, exitReason, json({ pnlPercent: finalPnlPercent, pnlSol: finalPnlSol, receivedSol: receivedSol ?? null, sell }));
+    closed = true;
+  } else if (exitReason && autoExit) {
+    db.prepare(`
+      UPDATE dry_run_positions
+      SET status = 'closed', closed_at_ms = ?, exit_price = ?, exit_mcap = ?, exit_reason = ?, pnl_percent = ?, pnl_sol = ?
+      WHERE id = ?
+    `).run(now(), price, mcap, exitReason, pnlPercent, pnlSol, position.id);
+    db.prepare(`
+      INSERT INTO dry_run_trades (position_id, mint, side, at_ms, price, mcap, size_sol, token_amount_est, reason, payload_json)
+      VALUES (?, ?, 'sell', ?, ?, ?, ?, ?, ?, ?)
+    `).run(position.id, position.mint, now(), price, mcap, position.size_sol, position.token_amount_est, exitReason, json({ pnlPercent, pnlSol }));
+    closed = true;
+  }
+  return {
+    ...position,
+    status: closed ? 'closed' : position.status,
+    closed_at_ms: closed ? now() : position.closed_at_ms,
+    asset,
+    price,
+    mcap,
+    highWaterMcap,
+    high_water_mcap: highWaterMcap,
+    high_water_price: highWaterPrice,
+    pnlPercent: finalPnlPercent,
+    pnl_percent: finalPnlPercent,
+    pnlSol: finalPnlSol,
+    pnl_sol: finalPnlSol,
+    exitReason: closed ? exitReason : null,
+    exit_reason: closed ? exitReason : position.exit_reason,
+    exit_mcap: closed ? mcap : position.exit_mcap,
+    exit_price: closed ? price : position.exit_price,
+  };
+}
+
+export async function monitorPositions() {
+  const positions = openPositions();
+  let walletPnlData = {};
+  const pubkey = liveWalletPubkey();
+  if (pubkey && positions.some(p => p.execution_mode === 'live')) {
+    walletPnlData = await fetchJupiterWalletPnl(pubkey);
+  }
+  for (const position of positions) {
+    const jupiterPnl = position.execution_mode === 'live'
+      ? (walletPnlData[position.mint]?.pnl || null)
+      : null;
+    const result = await refreshPosition(position, { autoExit: true, jupiterPnl }).catch((err) => {
+      console.log(`[position] ${position.id} ${err.message}`);
+      return null;
+    });
+    if (result?.exitReason) await sendPositionExit(result);
+  }
+}
