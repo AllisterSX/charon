@@ -3,7 +3,7 @@ import { TELEGRAM_CHAT_ID } from '../config.js';
 import { now, json } from '../utils.js';
 import { escapeHtml, fmtPct } from '../format.js';
 import { db } from '../db/connection.js';
-import { numSetting, boolSetting, setSetting, activeStrategy, setActiveStrategy, strategyById, updateStrategyConfig } from '../db/settings.js';
+import { numSetting, boolSetting, setSetting, setting, activeStrategy, setActiveStrategy, strategyById, updateStrategyConfig } from '../db/settings.js';
 import { candidateById, latestCandidateByMint, updateCandidateStatus } from '../db/candidates.js';
 import { storeDecision, logDecisionEvent } from '../db/decisions.js';
 import {
@@ -269,26 +269,50 @@ async function sendMenu(chatId = TELEGRAM_CHAT_ID) {
 }
 
 async function sendPnl(chatId, query = null) {
-  const wallets = savedWallets();
-  if (!wallets.length) {
-    const text = '📊 <b>PnL</b>\n\nNo saved wallets. Use /walletadd &lt;label&gt; &lt;address&gt;.';
-    return query ? editMenuMessage(query, text, navKeyboard()) : bot.sendMessage(chatId, text, { parse_mode: 'HTML' });
-  }
-  const chunks = [];
-  for (const wallet of wallets) {
-    const pnl = await fetchWalletPnl(wallet.address).catch(() => null);
-    if (!pnl) {
-      chunks.push(`• <b>${escapeHtml(wallet.label)}</b>: no data`);
-      continue;
+  // PnL from bot positions (database), not wallet API
+  const stats = db.prepare(`
+    SELECT
+      COUNT(*) as total,
+      SUM(CASE WHEN status='closed' THEN 1 ELSE 0 END) as closed,
+      SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) as open_count,
+      SUM(CASE WHEN pnl_sol > 0 THEN 1 ELSE 0 END) as wins,
+      SUM(CASE WHEN pnl_sol < 0 THEN 1 ELSE 0 END) as losses,
+      ROUND(SUM(COALESCE(pnl_sol, 0)), 4) as net_sol,
+      ROUND(AVG(CASE WHEN status='closed' THEN pnl_percent END), 1) as avg_pnl_pct,
+      ROUND(MAX(pnl_percent), 1) as best_pct,
+      ROUND(MIN(pnl_percent), 1) as worst_pct
+    FROM dry_run_positions
+  `).get();
+
+  const winRate = stats.closed > 0 ? ((stats.wins || 0) / stats.closed * 100).toFixed(1) : '0';
+  const mode = setting('trading_mode', 'dry_run');
+
+  const lines = [
+    `📊 <b>PnL</b> (${mode})`,
+    ``,
+    `Total: <b>${stats.total}</b> · Open: <b>${stats.open_count || 0}</b> · Closed: <b>${stats.closed || 0}</b>`,
+    `Wins: <b>${stats.wins || 0}</b> · Losses: <b>${stats.losses || 0}</b> · Win rate: <b>${winRate}%</b>`,
+    `Net PnL: <b>${stats.net_sol || 0} SOL</b>`,
+    `Avg PnL: <b>${stats.avg_pnl_pct || 0}%</b>`,
+    `Best: <b>${stats.best_pct || 0}%</b> · Worst: <b>${stats.worst_pct || 0}%</b>`,
+  ];
+
+  // Recent closed positions
+  const recent = db.prepare(`
+    SELECT symbol, pnl_percent, pnl_sol, exit_reason, execution_mode
+    FROM dry_run_positions WHERE status = 'closed'
+    ORDER BY closed_at_ms DESC LIMIT 5
+  `).all();
+  if (recent.length) {
+    lines.push(``, `<b>Recent:</b>`);
+    for (const r of recent) {
+      const emoji = Number(r.pnl_sol) > 0 ? '🟢' : '🔴';
+      lines.push(`${emoji} ${escapeHtml(r.symbol || '?')} ${r.pnl_percent?.toFixed(1) || '?'}% (${r.exit_reason || '?'})`);
     }
-    chunks.push([
-      `• <b>${escapeHtml(wallet.label)}</b>`,
-      `Win: ${fmtPct(pnl.winRate)} · PnL: ${fmtPct(pnl.totalPnlPercent)}`,
-      `Trades: ${pnl.totalTrades} · Wins: ${pnl.wins}`,
-    ].join('\n'));
   }
-  const text = `📊 <b>PnL</b>\n\n${chunks.join('\n\n')}`;
-  return query ? editMenuMessage(query, text, navKeyboard()) : bot.sendMessage(chatId, text, { parse_mode: 'HTML' });
+
+  const text = lines.join('\n');
+  return query ? editMenuMessage(query, text, navKeyboard()) : bot.sendMessage(chatId, text, { parse_mode: 'HTML', disable_web_page_preview: true });
 }
 
 function parseSetFilter(text) {
