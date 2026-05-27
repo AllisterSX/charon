@@ -155,9 +155,14 @@ export async function sendCandidate(chatId, id) {
 }
 
 export async function sendPositions(chatId) {
-  const rows = allPositions(12);
-  const text = rows.length ? rows.map(formatPosition).join('\n\n') : 'No dry-run positions yet.';
-  await bot.sendMessage(chatId, `📍 <b>Positions</b>\n\n${text}`, { parse_mode: 'HTML', disable_web_page_preview: true });
+  const open = db.prepare("SELECT * FROM dry_run_positions WHERE status = 'open' ORDER BY id DESC LIMIT 10").all();
+  if (!open.length) {
+    return bot.sendMessage(chatId, '📍 <b>Positions</b>\n\n(no open positions)', { parse_mode: 'HTML' });
+  }
+  for (const row of open) {
+    const buttons = positionButtons(row.id);
+    await bot.sendMessage(chatId, formatPosition(row), { parse_mode: 'HTML', disable_web_page_preview: true, ...buttons });
+  }
 }
 
 export async function sendPosition(chatId, id, query = null) {
