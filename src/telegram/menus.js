@@ -278,6 +278,15 @@ export function strategyKeyboard() {
     [
       { text: `Partial At ${strat.partial_tp_at_percent}%`, callback_data: 'stratinput:partial_tp_at_percent' },
     ],
+    [
+      { text: `Probe ${strat.probe_enabled ? 'on' : 'off'}`, callback_data: 'stratcfg:probe_enabled' },
+      { text: `Probe ${strat.probe_size_pct || 25}%`, callback_data: 'stratinput:probe_size_pct' },
+    ],
+    [
+      { text: `Confirm +${strat.probe_confirm_min_pnl_pct || 5}%`, callback_data: 'stratinput:probe_confirm_min_pnl_pct' },
+      { text: `Fail ${strat.probe_fail_max_pnl_pct || -10}%`, callback_data: 'stratinput:probe_fail_max_pnl_pct' },
+      { text: `Age ${strat.probe_max_age_ms ? Math.round(strat.probe_max_age_ms / 1000) + 's' : '?'}`, callback_data: 'stratinput:probe_max_age_ms' },
+    ],
   ];
   return {
     reply_markup: {
