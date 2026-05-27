@@ -90,6 +90,10 @@ export const strategyNumericLabels = {
   partial_tp_at_percent: 'partial TP trigger percent',
   partial_tp_sell_percent: 'partial TP sell percent',
   max_hold_ms: 'maximum hold milliseconds',
+  probe_size_pct: 'probe size percent (of position_size_sol)',
+  probe_confirm_min_pnl_pct: 'probe confirm minimum PnL percent',
+  probe_fail_max_pnl_pct: 'probe fail maximum PnL percent (negative)',
+  probe_max_age_ms: 'probe max age milliseconds (300000 = 5min)',
 };
 
 export function filtersKeyboard() {
